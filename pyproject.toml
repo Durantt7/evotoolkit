@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evotoolkit"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "LLM-driven code evolution method library."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -99,4 +99,7 @@ target-version = ['py311']
 [tool.isort]
 profile = "black"
 multi_line_output = 3
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports for registration side-effects
 

@@ -15,7 +15,6 @@ import time
 try:
     import torch
     import eagerpy as ep
-    import foolbox as fb
     from foolbox.devutils import flatten, atleast_kd
     from foolbox.models import Model
     from foolbox.criteria import Criterion
@@ -70,7 +69,8 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
             )
 
         if init_attack is not None and not isinstance(init_attack, MinimizationAttack):
-            raise NotImplementedError("init_attack must be a MinimizationAttack")
+            raise NotImplementedError(
+                "init_attack must be a MinimizationAttack")
 
         self.library_module = library_module
         self.init_attack = init_attack
@@ -122,7 +122,6 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
             best_advs = ep.astensor(starting_points)
 
         # Setup (moved up to define min_ and max_ before using them)
-        N = len(originals)
         ndim = originals.ndim
         min_, max_ = model.bounds
         np_bounds = np.array([min_, max_])
@@ -137,7 +136,8 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
                     f"Warning: init_attack failed for {failed} of {len(is_adv)} inputs. Using noisy originals."
                 )
                 noise_scale = 0.1
-                noise = ep.normal(originals, shape=originals.shape) * noise_scale
+                noise = ep.normal(
+                    originals, shape=originals.shape) * noise_scale
                 best_advs = ep.clip(originals + noise, min_, max_)
             else:
                 # If user-provided starting points are not adversarial, warn but continue
@@ -169,7 +169,7 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
                         orginals_np[i],
                         best_advs_np[i],
                         standard_noise_np[i],
-                        self.hyperparams[i : i + 1],
+                        self.hyperparams[i: i + 1],
                     )
                     candidates_np[i] = candidate_i
                 except Exception:
@@ -185,7 +185,8 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
 
             # Convert to tensors
             candidates = (
-                torch.from_numpy(candidates_np).float().to(originals_raw.device)
+                torch.from_numpy(candidates_np).float().to(
+                    originals_raw.device)
             )
 
             # Check adversarial status
@@ -214,7 +215,8 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
             best_advs = ep.where(is_best_adv, candidates, best_advs)
 
             # Check convergence
-            self.current_epsilons = ep.norms.l2(flatten(best_advs - originals), axis=-1)
+            self.current_epsilons = ep.norms.l2(
+                flatten(best_advs - originals), axis=-1)
             if (self.current_epsilons < self.min_epsilon).all():
                 return restore_type(best_advs)
 
@@ -235,7 +237,7 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
         Returns:
             Scaling factor for hyperparameters
         """
-        l = 0.5
+        lower = 0.5
         h = 1.5
         p_threshold = 0.25
 
@@ -243,7 +245,7 @@ class EvoAttack(MinimizationAttack if FOOLBOX_AVAILABLE else object):
         p_less_idx = p < p_threshold
         p_greater_idx = p >= p_threshold
 
-        f_p[p_less_idx] = l + (1 - l) * p[p_less_idx] / p_threshold
+        f_p[p_less_idx] = lower + (1 - lower) * p[p_less_idx] / p_threshold
         f_p[p_greater_idx] = 1 + (h - 1) * (p[p_greater_idx] - p_threshold) / (
             1 - p_threshold
         )

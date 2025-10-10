@@ -95,19 +95,6 @@ class AdversarialAttackTask(PythonTask):
                 },
             )
 
-        # Check dependencies
-        try:
-            import torch
-            import foolbox as fb
-        except ImportError as e:
-            return EvaluationResult(
-                valid=False,
-                score=float("-inf"),
-                additional_info={
-                    "error": f"Missing dependency: {str(e)}. Install with: pip install torch foolbox"
-                },
-            )
-
         # Create namespace with required modules
         namespace = {
             "__builtins__": {

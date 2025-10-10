@@ -35,4 +35,4 @@ class FunSearchConfig(BaseConfig):
         if kwargs and verbose:
             ignored = ", ".join(kwargs.keys())
             # Silently ignore, or uncomment to log:
-            # print(f"FunSearchConfig: Ignoring parameters: {ignored}")
+            print(f"FunSearchConfig: Ignoring parameters: {ignored}")

@@ -118,7 +118,8 @@ class ScientificRegressionTask(PythonTask):
 
         try:
             # Get dataset path, will auto-download if needed
-            base_dir = get_dataset_path("scientific_regression", data_dir=data_dir)
+            base_dir = get_dataset_path(
+                "scientific_regression", data_dir=data_dir)
             dataset_path = base_dir / dataset_name
         except DownloadError as e:
             raise FileNotFoundError(
@@ -136,7 +137,8 @@ class ScientificRegressionTask(PythonTask):
         # Load CSV files
         info = self.dataset_info
         train_df = pd.read_csv(dataset_path / "train.csv")
-        test_df = pd.read_csv(dataset_path / "test_id.csv")  # Use in-distribution test
+        # Use in-distribution test
+        test_df = pd.read_csv(dataset_path / "test_id.csv")
 
         # Extract inputs and outputs
         train_data = {
@@ -201,7 +203,8 @@ class ScientificRegressionTask(PythonTask):
             return EvaluationResult(
                 valid=False,
                 score=float("-inf"),
-                additional_info={"error": 'Function "equation" not found in code'},
+                additional_info={
+                    "error": 'Function "equation" not found in code'},
             )
 
         equation_func = namespace["equation"]
@@ -271,7 +274,8 @@ class ScientificRegressionTask(PythonTask):
                     y_pred = equation_func(inputs[:, 0], inputs[:, 1], params)
                 elif inputs.shape[1] == 4:
                     y_pred = equation_func(
-                        inputs[:, 0], inputs[:, 1], inputs[:, 2], inputs[:, 3], params
+                        inputs[:, 0], inputs[:, 1], inputs[:,
+                                                           2], inputs[:, 3], params
                     )
                 else:
                     # Generic case
@@ -281,7 +285,7 @@ class ScientificRegressionTask(PythonTask):
 
                 mse = np.mean((y_pred - outputs) ** 2)
                 return mse
-            except:
+            except Exception:
                 return 1e10  # Large penalty for errors
 
         # Optimize parameters with warning capture
@@ -311,7 +315,7 @@ class ScientificRegressionTask(PythonTask):
             # Return negative MSE (higher is better) and warnings
             return (-final_loss, captured_warnings)
 
-        except:
+        except Exception:
             return (None, captured_warnings)
 
     def get_base_task_description(self) -> str:
@@ -330,7 +334,8 @@ class ScientificRegressionTask(PythonTask):
             )
         else:
             signature = (
-                ", ".join([f"input{i}: np.ndarray" for i in range(len(input_names))])
+                ", ".join(
+                    [f"input{i}: np.ndarray" for i in range(len(input_names))])
                 + ", params: np.ndarray"
             )
 
@@ -377,18 +382,21 @@ Fitness: Your equation will be evaluated by optimizing parameters to minimize MS
             equation_body = f"    return params[0] * {input_names[0]} + params[1] * {input_names[1]} + params[2]"
             signature = f"{input_names[0]}, {input_names[1]}, params"
         elif len(input_names) == 4:
-            terms = [f"params[{i}] * {name}" for i, name in enumerate(input_names)]
+            terms = [f"params[{i}] * {name}" for i,
+                     name in enumerate(input_names)]
             equation_body = (
                 f"    return {' + '.join(terms)} + params[{len(input_names)}]"
             )
             signature = ", ".join(input_names) + ", params"
         else:
-            terms = [f"params[{i}] * input{i}" for i in range(len(input_names))]
+            terms = [
+                f"params[{i}] * input{i}" for i in range(len(input_names))]
             equation_body = (
                 f"    return {' + '.join(terms)} + params[{len(input_names)}]"
             )
             signature = (
-                ", ".join([f"input{i}" for i in range(len(input_names))]) + ", params"
+                ", ".join([f"input{i}" for i in range(
+                    len(input_names))]) + ", params"
             )
 
         initial_code = f'''import numpy as np

@@ -152,7 +152,7 @@ Do not give additional explanations.
             pattern = r"\{.*?\}"
             bracketed_texts = re.findall(pattern, response_str, re.DOTALL)
             algorithm = bracketed_texts[0] if bracketed_texts else None
-        except:
+        except Exception:
             algorithm = None
 
         # Remove only the algorithm part from response before code extraction

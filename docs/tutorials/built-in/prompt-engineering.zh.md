@@ -6,11 +6,12 @@
     如果您在研究中使用 EvoToolkit，请引用：
 
     ```bibtex
-    @software{evotoolkit2025,
-      title = {EvoToolkit: LLM-Driven Evolutionary Optimization},
-      author = {Guo, Ping},
-      year = {2025},
-      url = {https://github.com/pgg3/evotoolkit}
+    @article{guo2025evotoolkit,
+    title={evotoolkit: A Unified LLM-Driven Evolutionary Framework for Generalized Solution Search},
+    author={Guo, Ping and Zhang, Qingfu},
+    journal={arXiv preprint arXiv:XXXX.XXXXX},
+    year={2025},
+    note={Submitted to arXiv}
     }
     ```
 
@@ -61,12 +62,12 @@ pip install evotoolkit
 
 提示词优化任务通过进化 **字符串模板** 来最大化下游任务的性能。与进化代码的 Python 任务不同，提示词任务直接进化提示词文本。
 
-| 方面 | Python 任务 | 提示词任务 |
-|------|-------------|-----------|
-| **解决方案类型** | Python 代码 | 字符串模板 |
-| **进化目标** | 函数/算法 | 提示词文本 |
-| **评估方式** | 执行代码 | 用 LLM 测试模板 |
-| **示例** | `def func(x): return x**2` | `"求解：{question}\n答案："` |
+| 方面             | Python 任务                | 提示词任务                   |
+| ---------------- | -------------------------- | ---------------------------- |
+| **解决方案类型** | Python 代码                | 字符串模板                   |
+| **进化目标**     | 函数/算法                  | 提示词文本                   |
+| **评估方式**     | 执行代码                   | 用 LLM 测试模板              |
+| **示例**         | `def func(x): return x**2` | `"求解：{question}\n答案："` |
 
 ### 任务组件
 

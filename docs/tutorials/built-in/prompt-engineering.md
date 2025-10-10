@@ -6,11 +6,12 @@ Learn how to use LLM-driven evolution to optimize prompt templates for better do
     If you use EvoToolkit in your research, please cite:
 
     ```bibtex
-    @software{evotoolkit2025,
-      title = {EvoToolkit: LLM-Driven Evolutionary Optimization},
-      author = {Guo, Ping},
-      year = {2025},
-      url = {https://github.com/pgg3/evotoolkit}
+    @article{guo2025evotoolkit,
+    title={evotoolkit: A Unified LLM-Driven Evolutionary Framework for Generalized Solution Search},
+    author={Guo, Ping and Zhang, Qingfu},
+    journal={arXiv preprint arXiv:XXXX.XXXXX},
+    year={2025},
+    note={Submitted to arXiv}
     }
     ```
 
@@ -61,12 +62,12 @@ pip install evotoolkit
 
 A prompt optimization task evolves **string templates** to maximize performance on downstream tasks. Unlike Python tasks that evolve code, prompt tasks evolve prompt text directly.
 
-| Aspect | Python Task | Prompt Task |
-|--------|-------------|-------------|
-| **Solution type** | Python code | String template |
-| **Evolution target** | Function/algorithm | Prompt text |
-| **Evaluation** | Execute code | Test template with LLM |
-| **Example** | `def func(x): return x**2` | `"Solve: {question}\nAnswer:"` |
+| Aspect               | Python Task                | Prompt Task                    |
+| -------------------- | -------------------------- | ------------------------------ |
+| **Solution type**    | Python code                | String template                |
+| **Evolution target** | Function/algorithm         | Prompt text                    |
+| **Evaluation**       | Execute code               | Test template with LLM         |
+| **Example**          | `def func(x): return x**2` | `"Solve: {question}\nAnswer:"` |
 
 ### Task Components
 

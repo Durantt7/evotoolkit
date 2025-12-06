@@ -4,7 +4,7 @@
 """
 Operator signature parser for Python reference code.
 
-This module extracts operator signature (inputs, outputs, dtypes) from
+This module extracts operator signature (inputs, outputs) from
 Python reference implementations using AST parsing.
 
 Supports MultiKernelBench reference format:
@@ -39,10 +39,9 @@ class OperatorSignatureParser:
         Returns:
             Signature dict containing:
                 - op_name: Operator name (passed in, not parsed)
-                - inputs: List of forward() input info [{name, dtype}]
-                - outputs: List of output info [{name, dtype}]
-                - init_params: List of __init__() param info [{name, dtype, default}]
-                - dtypes: Supported data types
+                - inputs: List of forward() input info [{name, dtype, is_tensor}]
+                - outputs: List of output info [{name, dtype, is_tensor}]
+                - init_params: List of __init__() param info [{name, dtype, is_tensor, default}]
 
         Note:
             In MultiKernelBench, op_name comes from the dataset/filename, not from
@@ -66,7 +65,6 @@ class OperatorSignatureParser:
             "inputs": model_info["inputs"],
             "outputs": model_info["outputs"],
             "init_params": model_info.get("init_params", []),
-            "dtypes": model_info.get("dtypes", ["float16", "float32"]),
         }
 
     def _find_model_class(self, tree: ast.AST) -> Optional[Dict[str, Any]]:
@@ -74,7 +72,7 @@ class OperatorSignatureParser:
         Find Model class and extract __init__ and forward info.
 
         Returns:
-            Dict with inputs, outputs, init_params, dtypes
+            Dict with inputs, outputs, init_params
         """
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == "Model":
@@ -103,7 +101,6 @@ class OperatorSignatureParser:
                     "inputs": forward_info["inputs"],
                     "outputs": forward_info["outputs"],
                     "init_params": init_params,
-                    "dtypes": forward_info.get("dtypes", ["float16", "float32"]),
                 }
 
         return None
@@ -112,7 +109,7 @@ class OperatorSignatureParser:
         """
         Extract __init__ parameters (excluding self).
 
-        Returns list of {name, dtype, default} dicts.
+        Returns list of {name, dtype, is_tensor, default} dicts.
         """
         params = []
         args = init_method.args
@@ -125,9 +122,11 @@ class OperatorSignatureParser:
             if arg.arg == "self":
                 continue
 
+            type_info = self._extract_type_hint(arg.annotation)
             param_info = {
                 "name": arg.arg,
-                "dtype": self._extract_type_hint(arg.annotation),
+                "dtype": type_info["dtype"],
+                "is_tensor": type_info["is_tensor"],
             }
 
             # Check if this arg has a default value
@@ -162,43 +161,70 @@ class OperatorSignatureParser:
         for arg in func.args.args:
             if arg.arg == "self":
                 continue
-            dtype = self._extract_type_hint(arg.annotation)
-            inputs.append({"name": arg.arg, "dtype": dtype})
+            type_info = self._extract_type_hint(arg.annotation)
+            inputs.append({
+                "name": arg.arg,
+                "dtype": type_info["dtype"],
+                "is_tensor": type_info["is_tensor"],
+            })
 
         # Extract return type if available
         outputs = []
         if func.returns:
-            return_type = self._extract_type_hint(func.returns)
-            outputs.append({"name": "z", "dtype": return_type})
+            type_info = self._extract_type_hint(func.returns)
+            outputs.append({
+                "name": "z",
+                "dtype": type_info["dtype"],
+                "is_tensor": type_info["is_tensor"],
+            })
         else:
-            outputs.append({"name": "z", "dtype": "float"})
+            outputs.append({"name": "z", "dtype": "float", "is_tensor": True})
 
         return {
             "inputs": inputs,
             "outputs": outputs,
-            "dtypes": ["float16", "float32"],
         }
 
-    def _extract_type_hint(self, annotation: Optional[ast.AST]) -> str:
-        """Extract type hint string from AST annotation."""
+    def _extract_type_hint(self, annotation: Optional[ast.AST]) -> Dict[str, Any]:
+        """
+        Extract type hint info from AST annotation.
+
+        Returns:
+            Dict with:
+                - is_tensor: True for torch.Tensor, np.ndarray etc.
+                - dtype: Data precision (float, float16, int32, etc.)
+        """
         if annotation is None:
-            return "float"
+            return {"is_tensor": False, "dtype": "float"}
 
         if isinstance(annotation, ast.Name):
             name = annotation.id.lower()
-            if "tensor" in name:
-                return "float"
-            return name
+            if "tensor" in name or "ndarray" in name:
+                return {"is_tensor": True, "dtype": "float"}
+            # Scalar types
+            return {"is_tensor": False, "dtype": name}
 
         if isinstance(annotation, ast.Subscript):
-            # Handle generic types like Tensor[float32]
-            return "float"
+            # Handle generic types like Tensor[float16]
+            # Try to extract dtype from subscript
+            dtype = "float"
+            if isinstance(annotation.slice, ast.Name):
+                dtype = annotation.slice.id.lower()
+            return {"is_tensor": True, "dtype": dtype}
 
         if isinstance(annotation, ast.Attribute):
-            # Handle torch.Tensor, np.ndarray, etc.
-            return "float"
+            # Handle torch.Tensor, torch.FloatTensor, np.ndarray, etc.
+            attr = annotation.attr.lower()
+            if "tensor" in attr or "ndarray" in attr:
+                # Check for specific tensor types like FloatTensor, HalfTensor
+                if "half" in attr or "float16" in attr:
+                    return {"is_tensor": True, "dtype": "float16"}
+                elif "int" in attr:
+                    return {"is_tensor": True, "dtype": "int32"}
+                return {"is_tensor": True, "dtype": "float"}
+            return {"is_tensor": False, "dtype": attr}
 
-        return "float"
+        return {"is_tensor": False, "dtype": "float"}
 
     def _parse_with_regex(self, python_code: str, op_name: str) -> Dict[str, Any]:
         """
@@ -231,18 +257,19 @@ class OperatorSignatureParser:
                 # Handle "self" parameter
                 param_name = param.split(":")[0].strip().split("=")[0].strip()
                 if param_name and param_name != "self":
-                    inputs.append({"name": param_name, "dtype": "float"})
+                    # Check if type hint contains "tensor"
+                    is_tensor = "tensor" in param.lower()
+                    inputs.append({"name": param_name, "dtype": "float", "is_tensor": is_tensor})
         else:
             # Default inputs if no function found
             inputs = [
-                {"name": "x", "dtype": "float"},
-                {"name": "y", "dtype": "float"},
+                {"name": "x", "dtype": "float", "is_tensor": True},
+                {"name": "y", "dtype": "float", "is_tensor": True},
             ]
 
         return {
             "op_name": op_name,
             "inputs": inputs,
-            "outputs": [{"name": "z", "dtype": "float"}],
+            "outputs": [{"name": "z", "dtype": "float", "is_tensor": True}],
             "init_params": [],
-            "dtypes": ["float16", "float32"],
         }

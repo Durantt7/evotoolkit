@@ -27,7 +27,6 @@ def main():
     print(f"Inputs: {signature['inputs']}")
     print(f"Outputs: {signature['outputs']}")
     print(f"Init Params: {signature['init_params']}")
-    print(f"Dtypes: {signature['dtypes']}")
 
 
 if __name__ == "__main__":

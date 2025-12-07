@@ -176,6 +176,8 @@ Requirements:
         - host_operator_src: Complete host operator (Full LLM mode)
         - python_bind_src: Complete Python binding (Full LLM mode)
         - compile_only: Stop after compilation (for parallel compile)
+        - setup_only: Only run msopgen + write files (for parallel compile phase 1)
+        - build_only: Only run build.sh + deploy (for parallel compile phase 2)
         - load_from: Load pre-compiled result instead of compiling
         - skip_correctness: Skip correctness check
         - skip_performance: Skip performance measurement
@@ -197,7 +199,15 @@ Requirements:
             if project_path is None:
                 project_path = tempfile.mkdtemp(prefix=f"cann_{self.op_name}_")
 
-            # Step 1: Generate full code from kernel + templates
+            # Handle load_from mode FIRST (no code generation needed)
+            if config.load_from:
+                evaluator = AscendCEvaluator(
+                    project_path=project_path,
+                    device=self.npu_type,
+                )
+                return self._evaluate_from_loaded(evaluator, config)
+
+            # Generate full code from kernel + templates (only if not load_from)
             full_code = self._template_gen.generate(
                 kernel_src=kernel_src,
                 block_dim=config.block_dim,
@@ -242,26 +252,106 @@ Requirements:
                     },
                 )
 
-            # Create evaluator for this evaluation
+            # Handle setup_only mode (phase 1 of parallel compilation)
+            if config.setup_only:
+                from .backend import ascend_setup
+
+                setup_result = ascend_setup(
+                    full_code=full_code,
+                    op_name=self.op_name,
+                    project_path=project_path,
+                    device=self.npu_type,
+                )
+
+                if not setup_result["success"]:
+                    return EvaluationResult(
+                        valid=False,
+                        score=None,
+                        additional_info={
+                            "stage": "setup",
+                            "error": setup_result["error"],
+                            "project_path": project_path,
+                            "kernel_src": kernel_src,
+                        },
+                    )
+
+                # Save full_code for build phase
+                self._save_full_code(project_path, full_code)
+
+                return EvaluationResult(
+                    valid=True,
+                    score=None,
+                    additional_info={
+                        "stage": "setup_only",
+                        "project_path": project_path,
+                        "kernel_src": kernel_src,
+                        "target_directory": setup_result.get("target_directory"),
+                    },
+                )
+
+            # Handle build_only mode (phase 2 of parallel compilation)
+            if config.build_only:
+                from .backend import ascend_build
+
+                # Load full_code from setup phase
+                full_code = self._load_full_code(project_path)
+                if full_code is None:
+                    return EvaluationResult(
+                        valid=False,
+                        score=None,
+                        additional_info={
+                            "stage": "build",
+                            "error": "No full_code found. Run setup_only first.",
+                            "project_path": project_path,
+                        },
+                    )
+
+                build_result = ascend_build(
+                    op_name=self.op_name,
+                    project_path=project_path,
+                    full_code=full_code,
+                )
+
+                if not build_result["success"]:
+                    return EvaluationResult(
+                        valid=False,
+                        score=None,
+                        additional_info={
+                            "stage": "build",
+                            "error": build_result["error"],
+                            "project_path": project_path,
+                            "kernel_src": full_code.get("kernel_src", ""),
+                        },
+                    )
+
+                # Save compile result if requested
+                if config.save_compile_to:
+                    compile_result = CompileResult(
+                        success=True,
+                        project_path=project_path,
+                        op_name=self.op_name,
+                        context=build_result.get("context", {}),
+                        kernel_src=full_code.get("kernel_src", ""),
+                        full_code=full_code,
+                    )
+                    compile_result.save(config.save_compile_to)
+
+                return EvaluationResult(
+                    valid=True,
+                    score=None,
+                    additional_info={
+                        "stage": "build_only",
+                        "project_path": project_path,
+                        "kernel_src": full_code.get("kernel_src", ""),
+                    },
+                )
+
+            # Full compilation (setup + build)
             evaluator = AscendCEvaluator(
                 project_path=project_path,
                 device=self.npu_type,
             )
 
-            # Handle load_from mode (decoupled testing)
-            if config.load_from:
-                return self._evaluate_from_loaded(evaluator, config)
-
-            # Step 1: Generate full code from kernel + templates
-            full_code = self._template_gen.generate(
-                kernel_src=kernel_src,
-                block_dim=config.block_dim,
-                host_tiling_src=config.host_tiling_src,
-                host_operator_src=config.host_operator_src,
-                python_bind_src=config.python_bind_src,
-            )
-
-            # Step 2: Compile and deploy
             compile_result = evaluator.compile(
                 full_code,
                 self.op_name,
@@ -298,7 +388,7 @@ Requirements:
                     },
                 )
 
-            # Step 3: Verify correctness (unless skipped)
+            # Verify correctness (unless skipped)
             if not config.skip_correctness:
                 verify_result = evaluator.verify_correctness(
                     self.python_reference, self.op_name
@@ -318,7 +408,7 @@ Requirements:
                         },
                     )
 
-            # Step 4: Measure performance (unless skipped)
+            # Measure performance (unless skipped)
             if not config.skip_performance:
                 perf_result = evaluator.measure_performance(
                     self.op_name, python_reference=self.python_reference
@@ -358,6 +448,24 @@ Requirements:
                     "kernel_src": kernel_src,
                 },
             )
+
+    def _save_full_code(self, project_path: str, full_code: dict) -> None:
+        """Save full_code to project directory for build phase."""
+        import json
+        import os
+        os.makedirs(project_path, exist_ok=True)
+        with open(os.path.join(project_path, "full_code.json"), "w") as f:
+            json.dump(full_code, f)
+
+    def _load_full_code(self, project_path: str) -> dict:
+        """Load full_code from project directory."""
+        import json
+        import os
+        path = os.path.join(project_path, "full_code.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)
 
     def _evaluate_from_loaded(
         self, evaluator: AscendCEvaluator, config: CANNSolutionConfig

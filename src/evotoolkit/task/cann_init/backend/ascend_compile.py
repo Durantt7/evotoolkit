@@ -5,6 +5,11 @@
 Ascend C compilation pipeline.
 
 Adapted from MultiKernelBench/utils/ascend_compile_pipeline.py
+
+Supports phased execution for parallel compilation:
+- ascend_setup: msopgen + write files (must be sequential due to global locks)
+- ascend_build: build.sh + deploy + pybind (can be parallel in isolated dirs)
+- ascend_compile: full pipeline (setup + build)
 """
 
 import os
@@ -108,32 +113,25 @@ def write_project_files(
         }
 
 
-def ascend_compile(
+def ascend_setup(
     full_code: Dict[str, str],
     op_name: str,
     project_path: str,
     device: str = "Ascend910B",
 ) -> Dict[str, Any]:
     """
-    Compile Ascend C operator code.
+    Setup phase: msopgen + write source files.
 
-    This function adapts the MultiKernelBench ascend_compile logic but takes
-    full_code dict directly instead of executing generated code.
+    This phase must run sequentially due to msopgen global resource conflicts.
 
     Args:
-        full_code: Dictionary containing all code components:
-            - project_json_src
-            - host_tiling_src
-            - host_operator_src
-            - kernel_src
-            - python_bind_src
-            - model_src
+        full_code: Dictionary containing all code components
         op_name: Operator name (e.g., "add")
         project_path: Base directory for operator projects
         device: Target device (e.g., "Ascend910B")
 
     Returns:
-        {"success": bool, "error": str or None, "context": dict}
+        {"success": bool, "error": str or None, "target_directory": str}
     """
     op = f"{op_name}_custom"
     op_capital = underscore_to_pascalcase(op)
@@ -141,28 +139,19 @@ def ascend_compile(
     original_cwd = os.getcwd()
 
     # Convert device name to msopgen compute unit format
-    # e.g., "Ascend910B" -> "ai_core-Ascend910B2"
-    # Note: Keep original case and add version suffix if not present
     if device.lower().startswith("ascend"):
-        # Check if already has version suffix (e.g., Ascend910B2, Ascend910B3)
         if device[-1].isdigit() and device[-2].isalpha():
             compute_unit = f"ai_core-{device}"
         else:
-            # Add default version suffix "2" for 910B series
             compute_unit = f"ai_core-{device}2"
     else:
         compute_unit = f"ai_core-{device}"
 
-    # Context to store code and runtime objects
-    context = {}
-
     try:
         # Step 1: Create operator project directory
-        # Ensure project_path exists
         os.makedirs(project_path, exist_ok=True)
 
         if os.path.exists(target_directory):
-            print("[INFO] Operator project already exists, deleting...")
             shutil.rmtree(target_directory)
 
         # Write project JSON
@@ -191,9 +180,9 @@ def ascend_compile(
             print("[INFO] Operator project created successfully")
         except subprocess.CalledProcessError as e:
             error_msg = f"msopgen failed:\nExit Code: {e.returncode}\nStdout:\n{e.stdout}\nStderr:\n{e.stderr}"
-            return {"success": False, "error": error_msg, "context": context}
+            return {"success": False, "error": error_msg, "target_directory": target_directory}
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": "msopgen timed out", "context": context}
+            return {"success": False, "error": "msopgen timed out", "target_directory": target_directory}
         finally:
             os.chdir(original_cwd)
 
@@ -216,13 +205,52 @@ def ascend_compile(
         with open(os.path.join(csrc_dir, "op.cpp"), "w") as f:
             f.write(full_code.get("python_bind_src", ""))
 
+        # Write model_src for later use
+        model_path = os.path.join(project_path, "model_src.py")
+        with open(model_path, "w") as f:
+            f.write(full_code.get("model_src", ""))
+
+        print("[INFO] Setup phase completed successfully")
+        return {"success": True, "error": None, "target_directory": target_directory}
+
+    except Exception as e:
+        os.chdir(original_cwd)
+        return {"success": False, "error": f"Unexpected error: {str(e)}", "target_directory": target_directory}
+
+
+def ascend_build(
+    op_name: str,
+    project_path: str,
+    full_code: Dict[str, str],
+) -> Dict[str, Any]:
+    """
+    Build phase: build.sh + deploy + pybind.
+
+    This phase can run in parallel as each operates in isolated directories.
+
+    Args:
+        op_name: Operator name (e.g., "add")
+        project_path: Base directory for operator projects
+        full_code: Dictionary containing code (needed for model_src)
+
+    Returns:
+        {"success": bool, "error": str or None, "context": dict}
+    """
+    op = f"{op_name}_custom"
+    op_capital = underscore_to_pascalcase(op)
+    target_directory = os.path.join(project_path, op_capital)
+    cpp_ext_dir = os.path.join(project_path, "CppExtension")
+    original_cwd = os.getcwd()
+    context = {}
+
+    try:
         # Step 4: Build the operator
         print("[INFO] Building operator...")
         os.environ.pop("ASCEND_CUSTOM_OPP_PATH", None)
         os.chdir(target_directory)
 
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["./build.sh"],
                 check=True,
                 capture_output=True,
@@ -231,11 +259,15 @@ def ascend_compile(
             )
             print("[INFO] Build succeeded")
         except subprocess.CalledProcessError as e:
+            # Capture full output for debugging
+            full_output = f"STDOUT:\n{e.stdout}\n\nSTDERR:\n{e.stderr}"
             error_lines = []
             for line in (e.stdout + e.stderr).split("\n"):
-                if "[ERROR]" in line or "error:" in line.lower():
+                if "[ERROR]" in line or "error:" in line.lower() or "Error" in line:
                     error_lines.append(line)
-            error_msg = f"Build failed:\nExit Code: {e.returncode}\nErrors:\n" + "\n".join(error_lines[:20])
+            error_msg = f"Build failed:\nExit Code: {e.returncode}\nErrors:\n" + "\n".join(error_lines[:30])
+            if not error_lines:
+                error_msg += f"\n\nFull output:\n{full_output[:2000]}"
             return {"success": False, "error": error_msg, "context": context}
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "Build timed out", "context": context}
@@ -302,9 +334,46 @@ def ascend_compile(
         except Exception as e:
             return {"success": False, "error": f"Failed to load model: {str(e)}", "context": context}
 
-        print("[INFO] Compilation pipeline completed successfully")
+        print("[INFO] Build phase completed successfully")
         return {"success": True, "error": None, "context": context}
 
     except Exception as e:
         os.chdir(original_cwd)
         return {"success": False, "error": f"Unexpected error: {str(e)}", "context": context}
+
+
+def ascend_compile(
+    full_code: Dict[str, str],
+    op_name: str,
+    project_path: str,
+    device: str = "Ascend910B",
+) -> Dict[str, Any]:
+    """
+    Compile Ascend C operator code (full pipeline).
+
+    This function runs both setup and build phases sequentially.
+    For parallel compilation, use ascend_setup + ascend_build separately.
+
+    Args:
+        full_code: Dictionary containing all code components:
+            - project_json_src
+            - host_tiling_src
+            - host_operator_src
+            - kernel_src
+            - python_bind_src
+            - model_src
+        op_name: Operator name (e.g., "add")
+        project_path: Base directory for operator projects
+        device: Target device (e.g., "Ascend910B")
+
+    Returns:
+        {"success": bool, "error": str or None, "context": dict}
+    """
+    # Phase 1: Setup
+    setup_result = ascend_setup(full_code, op_name, project_path, device)
+    if not setup_result["success"]:
+        return {"success": False, "error": setup_result["error"], "context": {}}
+
+    # Phase 2: Build
+    build_result = ascend_build(op_name, project_path, full_code)
+    return build_result

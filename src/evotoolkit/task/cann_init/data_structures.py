@@ -181,6 +181,10 @@ class CANNSolutionConfig:
     skip_correctness: bool = False
     skip_performance: bool = False
 
+    # Phased execution (for parallel compilation)
+    setup_only: bool = False   # Only msopgen + write files (no build)
+    build_only: bool = False   # Only build.sh (assume setup done)
+
     # Save control
     save_compile_to: Optional[str] = None
 
@@ -200,6 +204,8 @@ class CANNSolutionConfig:
             load_from=d.get("load_from"),
             skip_correctness=d.get("skip_correctness", False),
             skip_performance=d.get("skip_performance", False),
+            setup_only=d.get("setup_only", False),
+            build_only=d.get("build_only", False),
             save_compile_to=d.get("save_compile_to"),
         )
 
@@ -225,6 +231,10 @@ class CANNSolutionConfig:
             result["skip_correctness"] = True
         if self.skip_performance:
             result["skip_performance"] = True
+        if self.setup_only:
+            result["setup_only"] = True
+        if self.build_only:
+            result["build_only"] = True
         if self.save_compile_to is not None:
             result["save_compile_to"] = self.save_compile_to
 

@@ -192,7 +192,7 @@ class OperatorSignatureParser:
         Returns:
             Dict with:
                 - is_tensor: True for torch.Tensor, np.ndarray etc.
-                - dtype: Data precision (float, float16, int32, etc.)
+                - dtype: Data precision (float, float16, int32, list_int, etc.)
         """
         if annotation is None:
             return {"is_tensor": False, "dtype": "float"}
@@ -205,8 +205,35 @@ class OperatorSignatureParser:
             return {"is_tensor": False, "dtype": name}
 
         if isinstance(annotation, ast.Subscript):
-            # Handle generic types like Tensor[float16]
-            # Try to extract dtype from subscript
+            # Get base type name (e.g., "List", "Tensor", "Optional")
+            base_name = ""
+            if isinstance(annotation.value, ast.Name):
+                base_name = annotation.value.id.lower()
+            elif isinstance(annotation.value, ast.Attribute):
+                base_name = annotation.value.attr.lower()
+
+            # Handle List types -> scalar with list_* dtype
+            if base_name == "list":
+                inner_type = "int"  # default
+                if isinstance(annotation.slice, ast.Name):
+                    inner_type = annotation.slice.id.lower()
+                return {"is_tensor": False, "dtype": f"list_{inner_type}"}
+
+            # Handle Optional[X] -> recurse into X
+            if base_name == "optional":
+                if isinstance(annotation.slice, ast.Name):
+                    return self._extract_type_hint(annotation.slice)
+                elif isinstance(annotation.slice, ast.Subscript):
+                    return self._extract_type_hint(annotation.slice)
+
+            # Handle Tensor[dtype] types
+            if "tensor" in base_name:
+                dtype = "float"
+                if isinstance(annotation.slice, ast.Name):
+                    dtype = annotation.slice.id.lower()
+                return {"is_tensor": True, "dtype": dtype}
+
+            # Default: assume tensor for unknown subscript types
             dtype = "float"
             if isinstance(annotation.slice, ast.Name):
                 dtype = annotation.slice.id.lower()

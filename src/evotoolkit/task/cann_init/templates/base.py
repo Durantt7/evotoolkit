@@ -66,33 +66,103 @@ class TemplateBase:
         return dtype_map.get(dtype.lower(), "float")
 
     def _dtype_to_cann_json(self, dtype: str) -> str:
-        """Convert Python dtype to CANN JSON type string (for tensor types)."""
+        """Convert Python dtype to CANN JSON type string (for tensor types).
+
+        Maps Python/PyTorch dtype to CANN msopgen JSON format type.
+        Reference: /usr/local/Ascend/.../op_gen/config/transform.json INPUT_OUTPUT_DTYPE_MAP
+        """
         dtype_map = {
+            # Float types
             "float": "float",
             "float32": "float",  # CANN uses "float" not "float32"
+            "fp32": "float",     # Alias
+            "half": "float16",   # PyTorch alias
+            "fp16": "float16",   # Alias
             "float16": "float16",
             "bfloat16": "bfloat16",
+            "bf16": "bfloat16",  # Alias
+            "double": "double",
+            "float64": "double",
+            # Integer types
             "int8": "int8",
             "int16": "int16",
             "int32": "int32",
+            "int": "int32",      # Python int -> int32 by default
             "int64": "int64",
+            "long": "int64",     # PyTorch alias
+            # Unsigned integer types
             "uint8": "uint8",
+            "uint16": "uint16",
+            "uint32": "uint32",
+            "uint64": "uint64",
+            # Other types
             "bool": "bool",
+            "complex64": "complex64",
+            "complex128": "complex128",
         }
         return dtype_map.get(dtype.lower(), "float")
 
-    def _dtype_to_ge_datatype(self, dtype: str) -> str:
-        """Convert Python dtype to ge::DataType enum (for tensor types)."""
+    def _dtype_to_cann_attr_type(self, dtype: str) -> str:
+        """Convert Python dtype to CANN JSON attr type string (for scalar attrs).
+
+        Reference: /usr/local/Ascend/.../op_gen/config/transform.json IR_ATTR_TYPE_MAP
+        """
+        # Already in CANN format - pass through directly
+        cann_attr_types = {
+            "int", "float", "bool", "string", "type",
+            "list_int", "list_float", "list_bool", "list_string",
+            "list_list_int", "tensor", "list_tensor", "list_type",
+        }
+        dtype_lower = dtype.lower()
+        if dtype_lower in cann_attr_types:
+            return dtype_lower
+
+        # Python type to CANN attr type
         dtype_map = {
+            "int": "int",
+            "int32": "int",
+            "int64": "int",
+            "float": "float",
+            "float32": "float",
+            "float16": "float",
+            "double": "float",
+            "bool": "bool",
+            "str": "string",
+        }
+        return dtype_map.get(dtype_lower, "float")
+
+    def _dtype_to_ge_datatype(self, dtype: str) -> str:
+        """Convert Python dtype to ge::DataType enum (for tensor types).
+
+        Reference: /usr/local/Ascend/.../include/graph/types.h enum DataType
+        """
+        dtype_map = {
+            # Float types
             "float": "ge::DT_FLOAT",
             "float32": "ge::DT_FLOAT",
+            "fp32": "ge::DT_FLOAT",
+            "half": "ge::DT_FLOAT16",
+            "fp16": "ge::DT_FLOAT16",
             "float16": "ge::DT_FLOAT16",
             "bfloat16": "ge::DT_BF16",
+            "bf16": "ge::DT_BF16",
+            "double": "ge::DT_DOUBLE",
+            "float64": "ge::DT_DOUBLE",
+            # Integer types
             "int8": "ge::DT_INT8",
             "int16": "ge::DT_INT16",
             "int32": "ge::DT_INT32",
+            "int": "ge::DT_INT32",
             "int64": "ge::DT_INT64",
+            "long": "ge::DT_INT64",
+            # Unsigned integer types
             "uint8": "ge::DT_UINT8",
+            "uint16": "ge::DT_UINT16",
+            "uint32": "ge::DT_UINT32",
+            "uint64": "ge::DT_UINT64",
+            # Other types
             "bool": "ge::DT_BOOL",
+            "complex64": "ge::DT_COMPLEX64",
+            "complex128": "ge::DT_COMPLEX128",
         }
         return dtype_map.get(dtype.lower(), "ge::DT_FLOAT")

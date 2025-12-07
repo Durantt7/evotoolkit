@@ -28,6 +28,7 @@ from .evaluator import AscendCEvaluator
 from .templates import AscendCTemplateGenerator
 from .signature_parser import OperatorSignatureParser
 from .data_structures import CompileResult, CANNSolutionConfig
+from .method_interface import CANNIniterInterface
 
 # Backend utilities
 from .backend import (
@@ -39,6 +40,7 @@ from .backend import (
 __all__ = [
     # Main classes
     "CANNInitTask",
+    "CANNIniterInterface",
     "AscendCEvaluator",
     "AscendCTemplateGenerator",
     "OperatorSignatureParser",

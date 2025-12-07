@@ -5,27 +5,19 @@
 Shared configuration for CANN Init examples.
 
 All example scripts import test data and utilities from here.
+Loads environment variables from .env file automatically.
 """
 
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from current directory
+load_dotenv(Path(__file__).parent / ".env")
 
 # Directories
 SRC_DIR = Path(__file__).parent / "0_test_task_src"
 OUTPUT_DIR = Path(__file__).parent / "output"
-
-# Load test data
-PYTHON_REFERENCE = (SRC_DIR / "python_reference.py").read_text()
-KERNEL_SRC = (SRC_DIR / "kernel_src.cpp").read_text()
-
-# Load tiling configuration (for Full LLM mode)
-_tiling_config = {}
-exec((SRC_DIR / "tiling_config.py").read_text(), _tiling_config)
-HOST_TILING_SRC = _tiling_config["HOST_TILING_SRC"]
-HOST_OPERATOR_SRC = _tiling_config["HOST_OPERATOR_SRC"]
-PYTHON_BIND_SRC = _tiling_config["PYTHON_BIND_SRC"]
-
-# Default mode configuration
-BLOCK_DIM = 8
 
 
 def ensure_output_dir(subdir: str = "") -> Path:
@@ -35,10 +27,28 @@ def ensure_output_dir(subdir: str = "") -> Path:
     return path
 
 
-def get_task_data(op_name: str = "add", npu_type: str = "Ascend910B") -> dict:
-    """Get standard task data dict."""
-    return {
-        "op_name": op_name,
-        "python_reference": PYTHON_REFERENCE,
-        "npu_type": npu_type,
-    }
+def get_llm():
+    """Get LLM instance from environment variables."""
+    from evotoolkit.tools.llm import HttpsApi
+
+    api_url = os.getenv("API_URL")
+    api_key = os.getenv("API_KEY")
+    model = os.getenv("MODEL", "gpt-4o")
+
+    if not api_url or not api_key:
+        raise ValueError(
+            "API_URL and API_KEY must be set in .env file.\n"
+            "Example .env:\n"
+            "  API_URL=ai.api.xn--fiqs8s\n"
+            "  API_KEY=sk-xxx\n"
+            "  MODEL=claude-sonnet-4-5-20250929"
+        )
+
+    return HttpsApi(api_url=api_url, key=api_key, model=model)
+
+
+def get_task(op_name: str = "Add", npu_type: str = "Ascend910B"):
+    """Get CANNInitTask instance."""
+    from evotoolkit.task.cann_init import CANNInitTask
+
+    return CANNInitTask(op_name=op_name, npu_type=npu_type)

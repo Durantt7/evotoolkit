@@ -63,30 +63,3 @@ def get_task_data(op_name: str = "add", npu_type: str = "Ascend910B") -> dict:
         "npu_type": npu_type,
         "python_reference": PYTHON_REFERENCE,
     }
-
-
-def get_llm():
-    """Get LLM instance from environment variables (script 5)."""
-    from evotoolkit.tools.llm import HttpsApi
-
-    api_url = os.getenv("API_URL")
-    api_key = os.getenv("API_KEY")
-    model = os.getenv("MODEL", "gpt-4o")
-
-    if not api_url or not api_key:
-        raise ValueError(
-            "API_URL and API_KEY must be set in .env file.\n"
-            "Example .env:\n"
-            "  API_URL=ai.api.xn--fiqs8s\n"
-            "  API_KEY=sk-xxx\n"
-            "  MODEL=claude-sonnet-4-5-20250929"
-        )
-
-    return HttpsApi(api_url=api_url, key=api_key, model=model)
-
-
-def get_task(op_name: str = "Add", npu_type: str = "Ascend910B"):
-    """Get CANNInitTask instance (script 5)."""
-    from evotoolkit.task.cann_init import CANNInitTask
-
-    return CANNInitTask(op_name=op_name, npu_type=npu_type)

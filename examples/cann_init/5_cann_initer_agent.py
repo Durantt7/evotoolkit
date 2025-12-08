@@ -14,15 +14,43 @@ CANNIniter Agent E2E 测试
     python 5_cann_initer_agent.py [easy|medium|hard]
 """
 
+import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from _config import get_task, get_llm
-
-from evotoolkit.task.cann_init import CANNIniterInterface
+from evotoolkit.task.cann_init import CANNIniterInterface, CANNInitTask
 from evotoolkit.evo_method.cann_initer import CANNIniter, CANNIniterConfig
+from evotoolkit.tools.llm import HttpsApi
+
+# Load .env from current directory
+load_dotenv(Path(__file__).parent / ".env")
+
+
+def get_llm():
+    """Get LLM instance from environment variables."""
+    api_url = os.getenv("API_URL")
+    api_key = os.getenv("API_KEY")
+    model = os.getenv("MODEL", "gpt-4o")
+
+    if not api_url or not api_key:
+        raise ValueError(
+            "API_URL and API_KEY must be set in .env file.\n"
+            "Example .env:\n"
+            "  API_URL=ai.api.xn--fiqs8s\n"
+            "  API_KEY=sk-xxx\n"
+            "  MODEL=claude-sonnet-4-5-20250929"
+        )
+
+    return HttpsApi(api_url=api_url, key=api_key, model=model)
+
+
+def get_task(op_name: str = "Add", npu_type: str = "Ascend910B"):
+    """Get CANNInitTask instance."""
+    return CANNInitTask(op_name=op_name, npu_type=npu_type)
 
 # Test cases directory
 TEST_CASES_DIR = Path(__file__).parent / "test_cases"

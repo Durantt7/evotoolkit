@@ -8,7 +8,6 @@ All example scripts import test data and utilities from here.
 Loads environment variables from .env file automatically.
 """
 
-import os
 from pathlib import Path
 from dotenv import load_dotenv
 

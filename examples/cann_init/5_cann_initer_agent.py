@@ -48,9 +48,13 @@ def get_llm():
     return HttpsApi(api_url=api_url, key=api_key, model=model)
 
 
-def get_task(op_name: str = "Add", npu_type: str = "Ascend910B"):
+def get_task(op_name: str, python_reference: str, npu_type: str = "Ascend910B"):
     """Get CANNInitTask instance."""
-    return CANNInitTask(op_name=op_name, npu_type=npu_type)
+    return CANNInitTask(data={
+        "op_name": op_name,
+        "npu_type": npu_type,
+        "python_reference": python_reference,
+    })
 
 # Test cases directory
 TEST_CASES_DIR = Path(__file__).parent / "test_cases"
@@ -108,7 +112,7 @@ def main(test_case: str = "easy"):
     python_ref = load_python_ref(test_case)
 
     # Initialize components
-    task = get_task(op_name=config_info["op_name"])
+    task = get_task(op_name=config_info["op_name"], python_reference=python_ref)
     llm = get_llm()
     interface = CANNIniterInterface()
 

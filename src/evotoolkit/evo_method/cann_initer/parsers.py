@@ -1,14 +1,14 @@
 # Copyright (c) 2025 Ping Guo
 # Licensed under the MIT License
 
-"""CANNIniter 解析工具"""
+"""CANNIniter common parsing utilities."""
 
 import json
 import re
 
 
 def parse_json(response: str) -> dict:
-    """从 LLM 响应中解析 JSON"""
+    """Parse JSON from LLM response."""
     json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
     if json_match:
         try:
@@ -21,9 +21,13 @@ def parse_json(response: str) -> dict:
         return {}
 
 
-def parse_code(response: str) -> str:
-    """从 LLM 响应中解析代码"""
-    code_match = re.search(r"```(?:cpp|c\+\+|python)?\s*(.*?)\s*```", response, re.DOTALL)
+def parse_code(response: str, lang: str = None) -> str:
+    """Parse code block from LLM response."""
+    if lang:
+        pattern = rf"```{lang}\s*(.*?)\s*```"
+    else:
+        pattern = r"```(?:cpp|c\+\+|python)?\s*(.*?)\s*```"
+    code_match = re.search(pattern, response, re.DOTALL)
     if code_match:
         return code_match.group(1).strip()
     return response.strip()

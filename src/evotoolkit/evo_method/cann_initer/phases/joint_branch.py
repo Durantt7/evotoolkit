@@ -6,7 +6,7 @@
 import re
 from typing import TYPE_CHECKING, List
 
-from ..parsers import parse_code, parse_json
+from ..parsers import parse_code
 
 if TYPE_CHECKING:
     from ..run_config import CANNIniterConfig
@@ -418,17 +418,17 @@ class JointBranch:
         joint_plan = self.run_state_dict.joint_plan
         raw_requests = joint_plan.get("retrieval_requests", [])
 
-        # Get LLM client if available
-        llm_client = None
+        # Create LLM callback if available
+        llm_call = None
         if self.config.running_llm:
-            def llm_client(prompt: str) -> str:
+            def llm_call(prompt: str) -> str:
                 response, _ = self.config.running_llm.get_response(prompt)
                 return response
 
         # Stage 1: RetrievalPlanner (概念性请求 → 精确请求)
         from ..knowledge import RetrievalPlanner, KnowledgeSummarizer
 
-        planner = RetrievalPlanner(self.config.knowledge_base, llm_client=llm_client)
+        planner = RetrievalPlanner(self.config.knowledge_base, llm_client=llm_call)
         plan_result = planner.plan(
             operator_description=self.run_state_dict.signature or "",
             kernel_pseudocode=joint_plan.get("kernel_pseudocode", ""),
@@ -459,7 +459,7 @@ class JointBranch:
             if hasattr(self.config.knowledge_base, 'config') else None
 
         summarizer = KnowledgeSummarizer(
-            llm_client=llm_client,
+            llm_client=llm_call,
             max_examples=2,
             cann_path=cann_path,
         )
@@ -483,29 +483,50 @@ class JointBranch:
         self.run_state_dict.retrieval_plan = plan_result
 
     def _implement_code(self, python_ref: str):
-        """代码实现
+        """三阶段代码实现
+
+        Stage 1: tiling.h (仅 custom tiling)
+        Stage 2: op_host.cpp (仅 custom tiling)
+        Stage 3: op_kernel.cpp (总是生成)
 
         使用 knowledge_context（KnowledgeSummarizer 的输出）作为知识上下文
         """
-        # Kernel 必须生成
-        kernel_prompt = self.config.interface.get_kernel_impl_prompt(
-            self.run_state_dict.joint_plan,
-            self.run_state_dict.knowledge_context,  # 使用精简后的知识上下文
-            python_ref
-        )
-        response, _ = self.config.running_llm.get_response(kernel_prompt)
-        self.run_state_dict.kernel_src = parse_code(response)
+        # 准备 context
+        context = {
+            "op_name": self.run_state_dict.op_name,
+            "signature": self.run_state_dict.signature,
+            "python_ref": python_ref,
+        }
+        knowledge = self.run_state_dict.knowledge_context
+        plan = self.run_state_dict.joint_plan
+        tiling_header = None
 
         # Tiling 根据策略决定
         if self.run_state_dict.strategies.get("tiling") == "default":
+            # Default tiling: 不需要生成 tiling.h 和 op_host.cpp
             self.run_state_dict.tiling_src = None
             self.run_state_dict.operator_src = None
         else:
-            tiling_prompt = self.config.interface.get_tiling_impl_prompt(
-                self.run_state_dict.joint_plan,
-                self.run_state_dict.knowledge_context  # 使用精简后的知识上下文
+            # Custom tiling: 三阶段生成
+
+            # Stage 1: 生成 tiling.h
+            tiling_header_prompt = self.config.interface.get_tiling_header_prompt(
+                plan, context
             )
-            response, _ = self.config.running_llm.get_response(tiling_prompt)
-            result = parse_json(response)
-            self.run_state_dict.tiling_src = result.get("host_tiling_src")
-            self.run_state_dict.operator_src = result.get("host_operator_src")
+            response, _ = self.config.running_llm.get_response(tiling_header_prompt)
+            tiling_header = parse_code(response)
+            self.run_state_dict.tiling_src = tiling_header
+
+            # Stage 2: 生成 op_host.cpp
+            tiling_host_prompt = self.config.interface.get_tiling_host_prompt(
+                plan, context, knowledge, tiling_header
+            )
+            response, _ = self.config.running_llm.get_response(tiling_host_prompt)
+            self.run_state_dict.operator_src = parse_code(response)
+
+        # Stage 3: 生成 op_kernel.cpp (总是需要)
+        kernel_prompt = self.config.interface.get_kernel_impl_prompt(
+            plan, context, knowledge, tiling_header
+        )
+        response, _ = self.config.running_llm.get_response(kernel_prompt)
+        self.run_state_dict.kernel_src = parse_code(response)

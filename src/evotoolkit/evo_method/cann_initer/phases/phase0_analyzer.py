@@ -144,6 +144,9 @@ class Phase0Analyzer:
             op_name: Operator name
             python_ref: Python reference implementation code
         """
+        # 0. Store op_name
+        self.run_state_dict.op_name = op_name
+
         # 1. Signature parsing (reuse Evaluator's parser)
         self._verbose("Parsing signature...")
         self.run_state_dict.signature = self.config.task._parser.parse(python_ref, op_name)

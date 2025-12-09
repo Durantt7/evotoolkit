@@ -69,13 +69,17 @@ class KernelPromptsMixin:
     ) -> str:
         """Generate full prompt for first round review (with examples)."""
         return f"""## Role
-You are the **kernel agent**. Review the tiling proposal and design kernel implementation.
+You are the **kernel agent** in a multi-agent Ascend C code generation pipeline.
 
-**This is conceptual design phase.** You describe:
-- Operations conceptually (e.g., "row-wise reduction"), not exact API names
-- Useful references for knowledge retrieval (similar ops, APIs to look up)
+Your task: Review the tiling proposal and design kernel implementation strategy.
 
-The retrieval system will fetch actual API docs and examples based on your output.
+**This is the conceptual design phase.** You will:
+1. Review tiling strategy for correctness
+2. Design kernel data flow (CopyIn → Compute → CopyOut)
+3. Describe operations conceptually (e.g., "row-wise reduction")
+4. List useful references (APIs and similar operators) for later retrieval
+
+At the end, list what knowledge would help implementation - exact names are NOT required.
 
 ## Hardware
 {hw_spec}
@@ -138,7 +142,8 @@ for (...) {{
 ```
 
 ## Useful References
-- <name>: <why>
+- APIs: [<conceptual API names for documentation lookup>]
+- Examples: [<similar operator names for code reference>]
 </response>
 
 **If you REJECT:**
@@ -180,7 +185,8 @@ for (int i = 0; i < tileNum; i++) {{
 ```
 
 ## Useful References
-- add_custom: similar element-wise pattern
+- APIs: [Add]
+- Examples: [add_custom]
 </response>
 
 ### Ex2: Accept Softmax (custom tiling)
@@ -214,9 +220,8 @@ for (int row = 0; row < rowsPerCore; row++) {{
 ```
 
 ## Useful References
-- softmax_custom: similar reduction pattern
-- ReduceMax: need for row-wise max
-- ReduceSum: need for normalization
+- APIs: [ReduceMax, ReduceSum, Exp, Sub, Div]
+- Examples: [softmax_custom]
 </response>
 
 ### Ex3: Reject wrong paradigm
@@ -245,7 +250,9 @@ Now review the tiling proposal. Output ONLY the `<response>` block:
     ) -> str:
         """Generate concise prompt for re-reviewing revised tiling proposal."""
         return f"""## Role
-You are the **kernel agent**. Re-review the revised tiling proposal.
+You are the **kernel agent** in a multi-agent Ascend C code generation pipeline.
+
+Your task: Re-review the revised tiling proposal.
 
 **Conceptual design phase** - describe operations conceptually, provide pseudocode using tiling fields.
 
@@ -284,7 +291,8 @@ accepted: true
 ```
 
 ## Useful References
-- <name>: <why>
+- APIs: [<conceptual API names>]
+- Examples: [<similar operator names>]
 </response>
 
 **If still needs revision:**
@@ -322,7 +330,9 @@ accepted: false
 
 """
         return f"""## Role
-You are the **kernel agent**. This is the **FINAL ROUND** of discussion.
+You are the **kernel agent** in a multi-agent Ascend C code generation pipeline.
+
+This is the **FINAL ROUND** of the planning discussion.
 
 ## CRITICAL: You MUST produce an implementable design now.
 
@@ -389,7 +399,8 @@ for (...) {{
 - <field>: <type> // <purpose>
 
 ## Useful References
-- <name>: <why>
+- APIs: [<conceptual API names for documentation lookup>]
+- Examples: [<similar operator names for code reference>]
 </response>
 
 Remember: This design will be used directly for code generation. Make it complete and implementable!

@@ -44,7 +44,11 @@ class TilingPromptsMixin:
 
         # First round: full prompt with examples
         return f"""## Role
-You are the **tiling agent**. Design a tiling strategy for the kernel agent.
+You are the **tiling agent** in a multi-agent Ascend C code generation pipeline.
+
+Your task: Design a tiling strategy that the kernel agent will use to implement the operator.
+
+**This is the conceptual design phase.** Your tiling fields will be used by the kernel agent to write pseudocode.
 
 ## Hardware
 {hw_spec}
@@ -211,7 +215,9 @@ Now analyze the given operator:
 {kernel_feedback}"""
 
         return f"""## Role
-You are the **tiling agent**. Revise your tiling strategy based on kernel feedback.
+You are the **tiling agent** in a multi-agent Ascend C code generation pipeline.
+
+Your task: Revise your tiling strategy based on kernel agent feedback.
 
 The tiling fields you define will be used in the kernel pseudocode. Ensure consistency.
 

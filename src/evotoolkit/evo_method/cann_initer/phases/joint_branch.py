@@ -84,8 +84,35 @@ class JointBranch:
         self.run_state_dict.joint_plan = self._extract_joint_plan(conversation)
 
     def _check_consensus(self, kernel_msg: str) -> bool:
-        """检查 Kernel 专员是否接受方案"""
-        return "accepted" in kernel_msg.lower() or "agree" in kernel_msg.lower()
+        """检查 Kernel 专员是否接受方案
+
+        解析 <response> 块中的 accepted 字段：
+        - accepted: true -> 达成共识
+        - accepted: false -> 需要继续修订
+        """
+        # 提取 <response> 块
+        start = kernel_msg.find('<response>')
+        end = kernel_msg.find('</response>')
+
+        if start == -1 or end == -1:
+            # 没有找到标准格式，尝试直接解析
+            content = kernel_msg
+        else:
+            content = kernel_msg[start + len('<response>'):end]
+
+        # 解析 accepted 字段（忽略大小写和空白）
+        content_lower = content.lower()
+
+        # 检查 "accepted: true" 或 "accepted:true"
+        if 'accepted: true' in content_lower or 'accepted:true' in content_lower:
+            return True
+
+        # 检查 "accepted: false" 或 "accepted:false"
+        if 'accepted: false' in content_lower or 'accepted:false' in content_lower:
+            return False
+
+        # 未找到明确的 accepted 字段，默认为未达成共识
+        return False
 
     def _extract_joint_plan(self, conversation: list) -> dict:
         """从对话中提取联合规划"""

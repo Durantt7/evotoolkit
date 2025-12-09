@@ -232,13 +232,19 @@ class KnowledgeSummarizer:
 
         # Format tiling fields for display
         tiling_fields = task_context.get("tiling_fields", [])
-        if isinstance(tiling_fields, list):
-            tiling_fields_str = "\n".join(
-                f"- {f.get('name', 'unknown')}: {f.get('type', 'unknown')} - {f.get('purpose', '')}"
-                for f in tiling_fields
-            ) if tiling_fields else "None"
-        else:
+        if isinstance(tiling_fields, list) and tiling_fields:
+            try:
+                tiling_fields_str = "\n".join(
+                    f"- {f.get('name', 'unknown')}: {f.get('type', 'unknown')} - {f.get('purpose', '')}"
+                    if isinstance(f, dict) else str(f)
+                    for f in tiling_fields
+                )
+            except Exception:
+                tiling_fields_str = str(tiling_fields)
+        elif tiling_fields:
             tiling_fields_str = str(tiling_fields)
+        else:
+            tiling_fields_str = "None"
 
         # Build prompt
         prompt = SUMMARIZER_PROMPT.format(
@@ -253,9 +259,14 @@ class KnowledgeSummarizer:
         # Call LLM
         try:
             response = self.llm_client(prompt)
+            if not response or not isinstance(response, str):
+                print(f"[KnowledgeSummarizer] LLM returned invalid response: {type(response)}")
+                return self._summarize_examples_rule_based(examples)
             return self._parse_example_summaries(response)
         except Exception as e:
+            import traceback
             print(f"[KnowledgeSummarizer] LLM call failed: {e}")
+            print(f"[KnowledgeSummarizer] Traceback: {traceback.format_exc()}")
             return self._summarize_examples_rule_based(examples)
 
     def _format_examples_for_llm(self, examples: Dict[str, Any]) -> str:
@@ -299,6 +310,10 @@ class KnowledgeSummarizer:
         """Parse LLM response for example summaries"""
         summaries = []
 
+        # Handle None or non-string responses
+        if not response or not isinstance(response, str):
+            return summaries
+
         # Extract content between <example_summaries> tags
         match = re.search(
             r"<example_summaries>(.*?)</example_summaries>",
@@ -319,21 +334,11 @@ class KnowledgeSummarizer:
 
             summary = {
                 "name": name,
-                "purpose": self._extract_field(
-                    section, "Selection Reason|选择理由|理由|相关度|目的"
-                ),
-                "mapping": self._extract_list_field(
-                    section, "Mapping to Current Task|与当前任务的映射"
-                ),
-                "patterns": self._extract_list_field(
-                    section, "Implementation Patterns|实现模式"
-                ),
-                "key_techniques": self._extract_list_field(
-                    section, "Key Techniques|关键技术"
-                ),
-                "not_applicable": self._extract_list_field(
-                    section, "Not Applicable|不适用部分"
-                ),
+                "purpose": self._extract_field(section, "Selection Reason"),
+                "mapping": self._extract_list_field(section, "Mapping to Current Task"),
+                "patterns": self._extract_list_field(section, "Implementation Patterns"),
+                "key_techniques": self._extract_list_field(section, "Key Techniques"),
+                "not_applicable": self._extract_list_field(section, "Not Applicable"),
                 "kernel_snippet": self._extract_labeled_code_block(section, "Kernel"),
                 "tiling_snippet": self._extract_labeled_code_block(section, "Tiling"),
             }
@@ -349,7 +354,9 @@ class KnowledgeSummarizer:
         pattern = rf"\*\*({field_pattern})\*\*:\s*(.+?)(?=\n\*\*|\n###|\Z)"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         if match:
-            return match.group(2).strip()
+            captured = match.group(2)
+            if captured and isinstance(captured, str):
+                return captured.strip()
         return ""
 
     def _extract_list_field(self, text: str, field_name: str) -> List[str]:
@@ -357,15 +364,19 @@ class KnowledgeSummarizer:
         pattern = rf"\*\*{field_name}\*\*:\s*\n((?:[-*]\s+.+\n?)+)"
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            items = re.findall(r"[-*]\s+(.+)", match.group(1))
-            return items
+            captured = match.group(1)
+            if captured and isinstance(captured, str):
+                items = re.findall(r"[-*]\s+(.+)", captured)
+                return items
         return []
 
     def _extract_code_block(self, text: str) -> str:
         """Extract code block from text"""
         match = re.search(r"```(?:cpp)?\s*\n(.*?)```", text, re.DOTALL)
         if match:
-            return match.group(1).strip()
+            captured = match.group(1)
+            if captured and isinstance(captured, str):
+                return captured.strip()
         return ""
 
     def _extract_labeled_code_block(self, text: str, label: str) -> str:
@@ -381,7 +392,9 @@ class KnowledgeSummarizer:
         pattern = rf"\*\*{label}[^*]*\*\*:\s*\n```(?:cpp)?\s*\n(.*?)```"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         if match:
-            return match.group(1).strip()
+            captured = match.group(1)
+            if captured and isinstance(captured, str):
+                return captured.strip()
         return ""
 
     def _extract_purpose_from_readme(self, readme: str) -> str:

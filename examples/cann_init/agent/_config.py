@@ -91,7 +91,7 @@ def get_llm():
             "  MODEL=claude-sonnet-4-5-20250929"
         )
 
-    return HttpsApi(api_url=api_url, key=api_key, model=model)
+    return HttpsApi(api_url=api_url, key=api_key, model=model, timeout=300)
 
 
 def get_knowledge_base():
@@ -138,62 +138,85 @@ JOINT_PLAN_CONTEXT = {
     "hard": {
         'tiling_strategy': 'custom',
         'tiling_fields': [
-            {'name': 'batchSize', 'type': 'uint32_t', 'purpose': 'batch dimension (32)'},
-            {'name': 'seqLen', 'type': 'uint32_t', 'purpose': 'sequence length dimension (128)'},
-            {'name': 'dModel', 'type': 'uint32_t', 'purpose': 'model dimension (768)'},
-            {'name': 'tileSeq', 'type': 'uint32_t', 'purpose': 'number of query rows per tile (4-8)'},
-            {'name': 'scaleVal', 'type': 'float', 'purpose': '1/sqrt(dModel) for attention scaling'},
+            {'name': 'batchSize', 'type': 'uint32_t', 'purpose': 'Total batch size (32)'},
+            {'name': 'seqLen', 'type': 'uint32_t', 'purpose': 'Sequence length (128)'},
+            {'name': 'dModel', 'type': 'uint32_t', 'purpose': 'Model dimension (768)'},
+            {'name': 'seqTileSize', 'type': 'uint32_t', 'purpose': 'Tile size for sequence dimension (32)'},
+            {'name': 'dTileSize', 'type': 'uint32_t', 'purpose': 'Tile size for model dimension (256)'},
+            {'name': 'batchesPerCore', 'type': 'uint32_t', 'purpose': 'Batches assigned per core: ceil(batchSize/24)'},
+            {'name': 'seqTiles', 'type': 'uint32_t', 'purpose': 'Number of sequence tiles: seqLen/seqTileSize (4)'},
+            {'name': 'dTiles', 'type': 'uint32_t', 'purpose': 'Number of d_model tiles: ceil(dModel/dTileSize) (3)'},
         ],
-        'kernel_pseudocode': '''// Using tiling fields: batchSize, seqLen, dModel, tileSeq, scaleVal
-for (int batch_idx = blockIdx / num_seq_tiles; batch_idx < batchSize; batch_idx += blockDim / num_seq_tiles) {
-    for (int seq_tile_idx = blockIdx % num_seq_tiles; seq_tile_idx < seqLen / tileSeq; seq_tile_idx += step) {
-        // CopyIn
-        qLocal = LoadTile(qGm, qRowOffset, tileSeq * dModel);          // [tileSeq, dModel]
-        kLocal = LoadTile(kGm, kOffset, seqLen * dModel);              // [seqLen, dModel]
-        vLocal = LoadTile(vGm, vOffset, seqLen * dModel);              // [seqLen, dModel]
+        'kernel_pseudocode': '''// Using tiling fields from proposal
+// Per-core variables
+uint32_t batchStart = GetBlockIdx() * batchesPerCore;
+uint32_t batchEnd = min(batchStart + batchesPerCore, batchSize);
 
-        // Compute: Q @ K^T
-        scoresLocal = MatMul(qLocal, kLocal_transposed, tileSeq, seqLen, dModel);  // [tileSeq, seqLen]
+// Allocate UB buffers
+LocalTensor<float> Q_tile[2]; // [seqTileSize, dTileSize] - double buffer
+LocalTensor<float> K_tile[2]; // [seqLen, dTileSize] - double buffer
+LocalTensor<float> V_tile[2]; // [seqTileSize, dTileSize] - double buffer
+LocalTensor<float> Scores_row; // [seqTileSize, seqLen] - full row
+LocalTensor<float> Output_tile; // [seqTileSize, dModel]
 
-        // Compute: Scale
-        scoresLocal = Muls(scoresLocal, scaleVal, tileSeq * seqLen);
+for (uint32_t b = batchStart; b < batchEnd; b++) {
+    for (uint32_t i_tile = 0; i_tile < seqTiles; i_tile++) {
+        uint32_t i_start = i_tile * seqTileSize;
 
-        // Compute: Softmax (row-wise over seqLen dimension)
-        for (int row = 0; row < tileSeq; row++) {
-            maxVal = ReduceMax(scoresLocal[row], seqLen);
-            scoresLocal[row] = Sub(scoresLocal[row], maxVal, seqLen);
-            scoresLocal[row] = Exp(scoresLocal[row], seqLen);
-            sumVal = ReduceSum(scoresLocal[row], seqLen);
-            scoresLocal[row] = Div(scoresLocal[row], sumVal, seqLen);
+        // Stage 1: Compute Scores[i_tile, :] via reduction over D
+        InitBuffer(Scores_row, 0.0f);
+        for (uint32_t d_tile = 0; d_tile < dTiles; d_tile++) {
+            // Load Q tile and K tile, accumulate Scores_row += Q_tile @ K_tile^T
+            MatMul(Scores_row, Q_tile, K_tile, accumulate=true, transposeB=true);
         }
 
-        // Compute: scores @ V
-        outLocal = MatMul(scoresLocal, vLocal, tileSeq, dModel, seqLen);  // [tileSeq, dModel]
+        // Stage 2: Scale and Softmax on full row
+        VecMuls(Scores_row, Scores_row, 1.0f / sqrt(dModel));
+        Softmax(Scores_row);
 
-        // CopyOut
-        StoreTile(outGm, outOffset, outLocal, tileSeq * dModel);
+        // Stage 3: Compute Output[i_tile, :] via tiled matmul
+        InitBuffer(Output_tile, 0.0f);
+        for (uint32_t d_tile = 0; d_tile < dTiles; d_tile++) {
+            for (uint32_t s_tile = 0; s_tile < seqTiles; s_tile++) {
+                // Load V tile, accumulate output
+                MatMul(Output_tile, Scores_slice, V_tile, accumulate=true);
+            }
+        }
+
+        CopyUB2GM(Output[b, i_start:i_start+seqTileSize, :], Output_tile);
     }
 }''',
-        'tiling_execution': '''for batch_idx in myBatches:
-    for seq_tile in mySeqTiles:
-        CopyIn: Q[batch_idx, seq_tile, :], K[batch_idx, :, :], V[batch_idx, :, :]
-        Compute:
-            - Cube: scores = Q_tile @ K^T
-            - Vector: scores /= sqrt(d_model)
-            - Vector: softmax(scores, dim=-1)
-            - Cube: out = scores @ V
-        CopyOut: output[batch_idx, seq_tile, :]''',
+        'tiling_execution': '''for batch in myBatches:  // ~1-2 batches per core
+    for i_tile in range(S/32):  // 4 tiles (output rows)
+        // Stage 1: Compute full Scores row via tiled matmul over D
+        Scores_row[32, 128] = zeros
+        for d_tile in range(D/256):  // 3 tiles
+            CopyIn: Q[batch, i_tile*32:(i_tile+1)*32, d_tile*256:(d_tile+1)*256]
+            CopyIn: K[batch, :, d_tile*256:(d_tile+1)*256]  // full S=128
+            Compute: Scores_row += Cube(Q_tile, K_tile^T)
+
+        // Stage 2: Scale and Softmax on full row
+        Compute: Scores_row = Scores_row / sqrt(768)
+        Compute: Scores_row = Softmax(Scores_row, dim=-1)
+
+        // Stage 3: Compute output via tiled matmul over D and S
+        Output_tile[32, D] = zeros
+        for d_tile in range(D/256):  // 3 tiles
+            for s_tile in range(S/32):  // 4 tiles
+                CopyIn: V[batch, s_tile*32:(s_tile+1)*32, d_tile*256:(d_tile+1)*256]
+                Compute: Output_tile[:, d_tile*256:(d_tile+1)*256] += Cube(Scores_row[:, s_tile*32:(s_tile+1)*32], V_tile)
+
+        CopyOut: Output[batch, i_tile*32:(i_tile+1)*32, :]''',
         'retrieval_requests': [
+            {'type': 'api', 'name': 'DataCopy'},
             {'type': 'api', 'name': 'MatMul'},
             {'type': 'api', 'name': 'Muls'},
-            {'type': 'api', 'name': 'ReduceMax'},
-            {'type': 'api', 'name': 'ReduceSum'},
-            {'type': 'api', 'name': 'Sub'},
-            {'type': 'api', 'name': 'Exp'},
-            {'type': 'api', 'name': 'Div'},
-            {'type': 'api', 'name': 'Transpose'},
-            {'type': 'example', 'name': 'matmul_custom'},
-            {'type': 'example', 'name': 'softmax_custom'},
+            {'type': 'api', 'name': 'Softmax'},
+            {'type': 'api', 'name': 'Add'},
+            {'type': 'example', 'name': 'Attention'},
+            {'type': 'example', 'name': 'MatMul'},
+            {'type': 'example', 'name': 'Softmax'},
+            {'type': 'example', 'name': 'LayerNorm'},
         ],
     },
 }
@@ -204,47 +227,61 @@ KNOWLEDGE_CONTEXT = {
     "medium": "",  # TODO
     "hard": """## API Reference
 
-### Mmad
-- **签名**: `void Mmad(const LocalTensor<DstT>& dstLocal, const LocalTensor<Src0T>& fmLocal,
-    const LocalTensor<Src1T>& filterLocal, const MmadParams& mmadParams)`
-- **描述**: Matrix multiplication and addition
-
-### Muls
-- **签名**: `void Muls(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal, const T& scalarValue,
-    uint64_t mask[], const uint8_t repeatTimes, const UnaryRepeatParams& repeatParams)`
-- **描述**: dst[i] = src[i] * scalar
-
-### ReduceMax
-- **签名**: `void ReduceMax(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal,
-    const LocalTensor<T>& workLocal, const int32_t mask, const int32_t repeatTimes, const int32_t srcRepStride,
-    bool calIndex = 0)`
-- **描述**: Index of the maximum value of all input elements
-
-### ReduceSum
-- **签名**: `void ReduceSum(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal,
-    const LocalTensor<T>& workLocal, const int32_t mask, const int32_t repeatTimes, const int32_t srcRepStride)`
-- **描述**: sum all input elements
-
-### Sub
-- **签名**: `void Sub(const LocalTensor<T>& dstLocal, const LocalTensor<T>& src0Local,
-    const LocalTensor<T>& src1Local, uint64_t mask[], const uint8_t repeatTimes,
-    const BinaryRepeatParams& repeatParams)`
-- **描述**: dst = src0 - src1
-
-### Exp
-- **签名**: `void Exp(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal, uint64_t mask[],
-    const uint8_t repeatTimes, const UnaryRepeatParams& repeatParams)`
-- **描述**: dst[i] = exp(src[i])
-
-### Div
-- **签名**: `void Div(const LocalTensor<T>& dstLocal, const LocalTensor<T>& src0Local,
-    const LocalTensor<T>& src1Local, uint64_t mask[], const uint8_t repeatTimes,
-    const BinaryRepeatParams& repeatParams)`
-- **描述**: dst = src0 / src1
+### Gemm
+- **Signature**: `void Gemm(const LocalTensor<dst_T>& dstLocal, const LocalTensor<src0_T>& src0Local,
+    const LocalTensor<src1_T>& src1Local, const uint32_t m, const uint32_t k, const uint32_t n, GemmTiling tilling,
+    bool partialsum = true, int32_t initValue = 0)`
+- **Description**: Multiply two matrices
 
 ### DataCopy
-- **签名**: `void DataCopy(const LocalTensor<T>& dstLocal, const GlobalTensor<T>& srcGlobal, const Nd2NzParams& params)`
-- **描述**: Copy data between global and local memory
+- **Signature**: `void DataCopy(const LocalTensor<T>& dstLocal, const GlobalTensor<T>& srcGlobal,
+                                                     const Nd2NzParams& intriParams)`
+- **Description**: format transform(such as nd2nz) during data load from OUT to L1
+
+### Muls
+- **Signature**: `void Muls(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal, const T& scalarValue,
+    uint64_t mask[], const uint8_t repeatTimes, const UnaryRepeatParams& repeatParams)`
+- **Description**: dst[i] = src[i] * scalar
+
+### Exp
+- **Signature**: `void Exp(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal, uint64_t mask[],
+    const uint8_t repeatTimes, const UnaryRepeatParams& repeatParams)`
+- **Description**: dst[i] = exp(src[i])
+
+### ReduceSum
+- **Signature**: `void ReduceSum(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal,
+    const LocalTensor<T>& workLocal, const int32_t mask, const int32_t repeatTimes, const int32_t srcRepStride)`
+- **Description**: sum all input elements
+
+### Div
+- **Signature**: `void Div(const LocalTensor<T>& dstLocal, const LocalTensor<T>& src0Local,
+                           const LocalTensor<T>& src1Local, uint64_t mask[], const uint8_t repeatTimes,
+                           const BinaryRepeatParams& repeatParams)`
+- **Description**: dst = src0 / src1
+
+### ReduceMax
+- **Signature**: `void ReduceMax(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal,
+    const LocalTensor<T>& workLocal, const int32_t mask, const int32_t repeatTimes, const int32_t srcRepStride,
+    bool calIndex = 0)`
+- **Description**: Index of the maximum value of all input elements
+
+## Example Reference
+
+### softmax_custom
+**Purpose**: Shows implementation of row-wise softmax operation
+
+**Key Techniques**:
+- ReduceMax for numerical stability
+- Exp and ReduceSum for softmax computation
+- Row-wise processing pattern
+
+### matmul_leakyrelu_custom
+**Purpose**: Shows tiled matrix multiplication with fused activation
+
+**Key Techniques**:
+- Cube unit for matrix multiplication
+- Double buffering for data movement
+- Tiled computation pattern
 """,
 }
 

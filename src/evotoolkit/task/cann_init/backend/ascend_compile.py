@@ -52,6 +52,7 @@ def write_project_files(
     """
     op = f"{op_name}_custom"
     op_capital = underscore_to_pascalcase(op)
+    op_lower = op_name.lower()  # For filenames (msopgen uses lowercase)
     target_directory = os.path.join(project_path, op_capital)
     files_written: List[str] = []
 
@@ -68,17 +69,19 @@ def write_project_files(
         files_written.append(json_path)
 
         # Write source files
-        tiling_path = os.path.join(target_directory, "op_host", f"{op}_tiling.h")
+        # NOTE: msopgen uses lowercase filenames (e.g., sdpa_custom_tiling.h, sdpa_custom.cpp)
+        # and our generated code includes match this convention
+        tiling_path = os.path.join(target_directory, "op_host", f"{op_lower}_custom_tiling.h")
         with open(tiling_path, "w") as f:
             f.write(full_code.get("host_tiling_src", ""))
         files_written.append(tiling_path)
 
-        host_path = os.path.join(target_directory, "op_host", f"{op}.cpp")
+        host_path = os.path.join(target_directory, "op_host", f"{op_lower}_custom.cpp")
         with open(host_path, "w") as f:
             f.write(full_code.get("host_operator_src", ""))
         files_written.append(host_path)
 
-        kernel_path = os.path.join(target_directory, "op_kernel", f"{op}.cpp")
+        kernel_path = os.path.join(target_directory, "op_kernel", f"{op_lower}_custom.cpp")
         with open(kernel_path, "w") as f:
             f.write(full_code.get("kernel_src", ""))
         files_written.append(kernel_path)
@@ -135,6 +138,7 @@ def ascend_setup(
     """
     op = f"{op_name}_custom"
     op_capital = underscore_to_pascalcase(op)
+    op_lower = op_name.lower()  # For filenames (msopgen uses lowercase)
     target_directory = os.path.join(project_path, op_capital)
     original_cwd = os.getcwd()
 
@@ -189,13 +193,14 @@ def ascend_setup(
         # Step 3: Write source files to project
         print("[INFO] Writing source files...")
 
-        with open(os.path.join(target_directory, "op_host", f"{op}_tiling.h"), "w") as f:
+        # NOTE: msopgen uses lowercase filenames (e.g., sdpa_custom_tiling.h, sdpa_custom.cpp)
+        with open(os.path.join(target_directory, "op_host", f"{op_lower}_custom_tiling.h"), "w") as f:
             f.write(full_code.get("host_tiling_src", ""))
 
-        with open(os.path.join(target_directory, "op_host", f"{op}.cpp"), "w") as f:
+        with open(os.path.join(target_directory, "op_host", f"{op_lower}_custom.cpp"), "w") as f:
             f.write(full_code.get("host_operator_src", ""))
 
-        with open(os.path.join(target_directory, "op_kernel", f"{op}.cpp"), "w") as f:
+        with open(os.path.join(target_directory, "op_kernel", f"{op_lower}_custom.cpp"), "w") as f:
             f.write(full_code.get("kernel_src", ""))
 
         # Set up Python binding directory with built-in templates

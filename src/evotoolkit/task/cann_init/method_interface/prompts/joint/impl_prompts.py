@@ -19,6 +19,24 @@ from typing import List, Optional
 from evotoolkit.task.cann_init.method_interface.prompts.phase0 import _format_signature
 
 
+def _to_pascal_case(name: str) -> str:
+    """Convert operator name to PascalCase.
+
+    CANN convention:
+    - "SDPA" -> "Sdpa"
+    - "add" -> "Add"
+    - "layer_norm" -> "LayerNorm"
+    """
+    # Handle underscore-separated names
+    if "_" in name:
+        return "".join(word.capitalize() for word in name.split("_"))
+    # Handle all-caps (SDPA -> Sdpa)
+    if name.isupper():
+        return name.capitalize()
+    # Handle already PascalCase or mixed
+    return name[0].upper() + name[1:] if name else name
+
+
 def _format_tiling_fields(tiling_fields: List[dict]) -> str:
     """Format tiling fields for prompt display.
 
@@ -96,16 +114,31 @@ class ImplPromptsMixin:
 
         Returns:
             Complete tiling.h source code
+
+        CANN Naming Convention:
+            - op_name="SDPA" -> class: SdpaCustomTilingData, register: SdpaCustom
+            - op_name="add" -> class: AddCustomTilingData, register: AddCustom
         """
-        return f"""#include "register/tilingdata_base.h"
+        # Convert to CANN naming convention: SDPA -> Sdpa, add -> Add
+        op_pascal = _to_pascal_case(op_name)
+        op_lower = op_name.lower()
+        tiling_class = f"{op_pascal}CustomTilingData"
+        register_name = f"{op_pascal}Custom"
+        header_guard = f"{op_lower.upper()}_CUSTOM_TILING_H"
+
+        return f"""#ifndef {header_guard}
+#define {header_guard}
+#include "register/tilingdata_base.h"
 
 namespace optiling {{
-BEGIN_TILING_DATA_DEF({op_name}TilingData)
+BEGIN_TILING_DATA_DEF({tiling_class})
 {field_definitions}
 END_TILING_DATA_DEF;
 
-REGISTER_TILING_DATA_CLASS({op_name}, {op_name}TilingData)
+REGISTER_TILING_DATA_CLASS({register_name}, {tiling_class})
 }}
+
+#endif // {header_guard}
 """
 
     def get_tiling_header_prompt(
@@ -208,8 +241,14 @@ Now output the field definitions for `{op_name}`. Output ONLY the `<response>` b
 
         Returns:
             Complete op_host.cpp source code
+
+        CANN Naming Convention:
+            - op_name="SDPA" -> op_lower="sdpa", op_class="SdpaCustom"
         """
         op_lower = op_name.lower()
+        op_pascal = _to_pascal_case(op_name)
+        op_class = f"{op_pascal}Custom"
+        tiling_class = f"{op_pascal}CustomTilingData"
 
         # Default InferShape: output shape = input shape
         if not infer_shape_body or not infer_shape_body.strip():
@@ -219,7 +258,6 @@ Now output the field definitions for `{op_name}`. Output ONLY the `<response>` b
 
         return f"""#include "{op_lower}_custom_tiling.h"
 #include "register/op_def_registry.h"
-#include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {{
 
@@ -237,15 +275,16 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context) {{
 }}
 
 namespace ops {{
-class {op_name} : public OpDef {{
+class {op_class} : public OpDef {{
 public:
-    explicit {op_name}(const char* name) : OpDef(name) {{
+    explicit {op_class}(const char* name) : OpDef(name) {{
 {input_output_defs}
-        this->SetInferShape(ge::InferShape)
-            .SetTiling(optiling::TilingFunc);
+        this->SetInferShape(ge::InferShape);
+        this->AICore().SetTiling(optiling::TilingFunc);
+        this->AICore().AddConfig("ascend910b");
     }}
 }};
-OP_ADD({op_name});
+OP_ADD({op_class});
 }}
 """
 
@@ -285,6 +324,10 @@ OP_ADD({op_name});
         formatted_sig = _format_signature(context.get("signature"))
         # NOTE: python_ref is intentionally NOT used here.
         # tiling_execution already contains the translated calculation logic.
+
+        # Compute correct tiling class name (CANN convention)
+        op_pascal = _to_pascal_case(op_name)
+        tiling_class = f"{op_pascal}CustomTilingData"
 
         # Show the template with placeholders
         template_code = self.assemble_tiling_host(
@@ -342,7 +385,7 @@ The body of TilingFunc (excluding return statement).
 Must include:
 - Shape extraction: `context->GetInputShape(i)->GetStorageShape()`
 - Tiling calculation logic
-- Create and populate tiling struct: `{op_name}TilingData tiling;`
+- Create and populate tiling struct: `{tiling_class} tiling;`
 - Set fields: `tiling.set_fieldName(value);`
 - Set block dim: `context->SetBlockDim(n);`
 - Save tiling (fixed pattern below)
@@ -366,7 +409,7 @@ Pattern:
     auto shape = context->GetInputShape(0)->GetStorageShape();
     uint32_t dim0 = shape.GetDim(0);
     ...
-    {op_name}TilingData tiling;
+    {tiling_class} tiling;
     tiling.set_field1(value1);
     ...
     context->SetBlockDim(8);
@@ -389,7 +432,7 @@ Pattern:
     uint32_t coreNum = 8;
     uint32_t rowsPerCore = (batchSize + coreNum - 1) / coreNum;
 
-    SoftmaxTilingData tiling;
+    SoftmaxCustomTilingData tiling;
     tiling.set_batchSize(batchSize);
     tiling.set_featureDim(featureDim);
     tiling.set_rowsPerCore(rowsPerCore);
@@ -594,6 +637,9 @@ Provide the following 9 parts:
 ### 1. INIT_PARAMS
 Function parameters for Init (e.g., `GM_ADDR x, GM_ADDR y, uint32_t totalLength`)
 
+**IMPORTANT**: Init must accept INDIVIDUAL parameters (GM_ADDR, uint32_t, etc.), NOT a tiling struct reference.
+The tiling struct is only accessible in the extern "C" function via GET_TILING_DATA.
+
 ### 2. INIT_BODY
 Body of Init function (GlobalTensor setup, pipe initialization)
 
@@ -616,31 +662,32 @@ Private member variable declarations
 Parameters for extern "C" function (before `GM_ADDR workspace, GM_ADDR tiling`)
 
 ### 9. INIT_CALL_ARGS
-Arguments passed to op.Init() call
+Arguments passed to op.Init() call. Extract values from tiling_data (e.g., `x, y, z, tiling_data.totalLength, tiling_data.tileNum`)
 
 ## API Patterns
 
 | Part | Pattern | Example |
 |------|---------|---------|
-| GlobalTensor init | `xGm.SetGlobalBuffer((__gm__ T*)addr)` | `xGm.SetGlobalBuffer((__gm__ half*)x);` |
-| Pipe init | `pipe.InitBuffer(queue, BUFFER_NUM, size)` | `pipe.InitBuffer(inQueue, BUFFER_NUM, tileLength * sizeof(half));` |
-| Alloc tensor | `queue.AllocTensor<T>()` | `LocalTensor<half> xLocal = inQueue.AllocTensor<half>();` |
-| DataCopy in | `DataCopy(local, gm[offset], count)` | `DataCopy(xLocal, xGm[progress * tileLength], tileLength);` |
+| GlobalTensor init | `xGm.SetGlobalBuffer((__gm__ T*)addr + offset, length)` | `xGm.SetGlobalBuffer((__gm__ float*)x + blockLength * AscendC::GetBlockIdx(), blockLength);` |
+| Pipe init | `pipe.InitBuffer(queue, BUFFER_NUM, size)` | `pipe.InitBuffer(inQueue, BUFFER_NUM, tileLength * sizeof(float));` |
+| Alloc tensor | `queue.AllocTensor<T>()` | `AscendC::LocalTensor<float> xLocal = inQueue.AllocTensor<float>();` |
+| DataCopy in | `AscendC::DataCopy(local, gm[offset], count)` | `AscendC::DataCopy(xLocal, xGm[progress * tileLength], tileLength);` |
 | EnQue | `queue.EnQue(tensor)` | `inQueue.EnQue(xLocal);` |
-| DeQue | `queue.DeQue<T>()` | `LocalTensor<half> xLocal = inQueue.DeQue<half>();` |
-| Compute | `Op(dst, src, ...)` | `Add(zLocal, xLocal, yLocal, tileLength);` |
-| DataCopy out | `DataCopy(gm[offset], local, count)` | `DataCopy(zGm[progress * tileLength], zLocal, tileLength);` |
+| DeQue | `queue.DeQue<T>()` | `AscendC::LocalTensor<float> xLocal = inQueue.DeQue<float>();` |
+| Compute | `AscendC::Op(dst, src, ...)` | `AscendC::Add(zLocal, xLocal, yLocal, tileLength);` |
+| DataCopy out | `AscendC::DataCopy(gm[offset], local, count)` | `AscendC::DataCopy(zGm[progress * tileLength], zLocal, tileLength);` |
 | FreeTensor | `queue.FreeTensor(tensor)` | `inQueue.FreeTensor(xLocal);` |
-| Get tiling | `tilingData.<field>` | `tilingData.totalLength` |
+| Get tiling | `tiling_data.<field>` | `tiling_data.totalLength` |
+| Get block info | `AscendC::GetBlockNum()`, `AscendC::GetBlockIdx()` | `blockLength = totalLength / AscendC::GetBlockNum();` |
 
 ## Member Variable Types
 
 | Type | Declaration |
 |------|-------------|
-| Pipe | `TPipe pipe;` |
-| Input queue | `TQue<QuePosition::VECIN, BUFFER_NUM> inQueue;` |
-| Output queue | `TQue<QuePosition::VECOUT, BUFFER_NUM> outQueue;` |
-| Global tensor | `GlobalTensor<half> xGm;` |
+| Pipe | `AscendC::TPipe pipe;` |
+| Input queue | `AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueue;` |
+| Output queue | `AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueue;` |
+| Global tensor | `AscendC::GlobalTensor<float> xGm;` |
 | Tiling param | `uint32_t tileNum;` |
 
 ## Response Format
@@ -650,18 +697,23 @@ GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t totalLength, uint32_t tileNum
 </init_params>
 
 <init_body>
-        xGm.SetGlobalBuffer((__gm__ half*)x);
-        yGm.SetGlobalBuffer((__gm__ half*)y);
-        zGm.SetGlobalBuffer((__gm__ half*)z);
+        // Each core processes blockLength elements
+        this->blockLength = totalLength / AscendC::GetBlockNum();
         this->tileNum = tileNum;
-        this->tileLength = totalLength / tileNum;
-        pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(half));
-        pipe.InitBuffer(inQueueY, BUFFER_NUM, tileLength * sizeof(half));
-        pipe.InitBuffer(outQueue, BUFFER_NUM, tileLength * sizeof(half));
+        this->tileLength = this->blockLength / tileNum / BUFFER_NUM;
+
+        xGm.SetGlobalBuffer((__gm__ float*)x + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        yGm.SetGlobalBuffer((__gm__ float*)y + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+        zGm.SetGlobalBuffer((__gm__ float*)z + this->blockLength * AscendC::GetBlockIdx(), this->blockLength);
+
+        pipe.InitBuffer(inQueueX, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(inQueueY, BUFFER_NUM, this->tileLength * sizeof(float));
+        pipe.InitBuffer(outQueueZ, BUFFER_NUM, this->tileLength * sizeof(float));
 </init_body>
 
 <process_body>
-        for (int32_t i = 0; i < tileNum; i++) {{
+        int32_t loopCount = this->tileNum * BUFFER_NUM;
+        for (int32_t i = 0; i < loopCount; i++) {{
             CopyIn(i);
             Compute(i);
             CopyOut(i);
@@ -669,35 +721,36 @@ GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t totalLength, uint32_t tileNum
 </process_body>
 
 <copyin_body>
-        LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
-        LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
-        DataCopy(xLocal, xGm[progress * tileLength], tileLength);
-        DataCopy(yLocal, yGm[progress * tileLength], tileLength);
+        AscendC::LocalTensor<float> xLocal = inQueueX.AllocTensor<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.AllocTensor<float>();
+        AscendC::DataCopy(xLocal, xGm[progress * this->tileLength], this->tileLength);
+        AscendC::DataCopy(yLocal, yGm[progress * this->tileLength], this->tileLength);
         inQueueX.EnQue(xLocal);
         inQueueY.EnQue(yLocal);
 </copyin_body>
 
 <compute_body>
-        LocalTensor<half> xLocal = inQueueX.DeQue<half>();
-        LocalTensor<half> yLocal = inQueueY.DeQue<half>();
-        LocalTensor<half> zLocal = outQueue.AllocTensor<half>();
-        Add(zLocal, xLocal, yLocal, tileLength);
-        outQueue.EnQue(zLocal);
+        AscendC::LocalTensor<float> xLocal = inQueueX.DeQue<float>();
+        AscendC::LocalTensor<float> yLocal = inQueueY.DeQue<float>();
+        AscendC::LocalTensor<float> zLocal = outQueueZ.AllocTensor<float>();
+        AscendC::Add(zLocal, xLocal, yLocal, this->tileLength);
+        outQueueZ.EnQue<float>(zLocal);
         inQueueX.FreeTensor(xLocal);
         inQueueY.FreeTensor(yLocal);
 </compute_body>
 
 <copyout_body>
-        LocalTensor<half> zLocal = outQueue.DeQue<half>();
-        DataCopy(zGm[progress * tileLength], zLocal, tileLength);
-        outQueue.FreeTensor(zLocal);
+        AscendC::LocalTensor<float> zLocal = outQueueZ.DeQue<float>();
+        AscendC::DataCopy(zGm[progress * this->tileLength], zLocal, this->tileLength);
+        outQueueZ.FreeTensor(zLocal);
 </copyout_body>
 
 <member_vars>
-    TPipe pipe;
-    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
-    TQue<QuePosition::VECOUT, BUFFER_NUM> outQueue;
-    GlobalTensor<half> xGm, yGm, zGm;
+    AscendC::TPipe pipe;
+    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
+    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueueZ;
+    AscendC::GlobalTensor<float> xGm, yGm, zGm;
+    uint32_t blockLength;
     uint32_t tileNum;
     uint32_t tileLength;
 </member_vars>
@@ -707,7 +760,7 @@ GM_ADDR x, GM_ADDR y, GM_ADDR z,
 </global_func_params>
 
 <init_call_args>
-x, y, z, tilingData.totalLength, tilingData.tileNum
+x, y, z, tiling_data.totalLength, tiling_data.tileNum
 </init_call_args>
 
 Now output all 9 parts for `{op_name}`:

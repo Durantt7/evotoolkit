@@ -85,7 +85,12 @@ def main(test_case: str = "hard"):
     run_state_dict.op_name = phase0_ctx["op_name"]
     run_state_dict.signature = phase0_ctx["signature"]
     run_state_dict.compute_pattern = phase0_ctx["compute_pattern"]
-    run_state_dict.strategies = phase0_ctx["strategies"]
+    # Start with Phase 0 strategies, then update with Joint Plan results
+    # Joint Planning may change tiling strategy (e.g., default -> custom if Kernel Agent
+    # outputs Tiling Fields Required)
+    run_state_dict.strategies = phase0_ctx["strategies"].copy()
+    if "tiling_strategy" in joint_plan:
+        run_state_dict.strategies["tiling"] = joint_plan["tiling_strategy"]
     run_state_dict.joint_plan = joint_plan
     run_state_dict.knowledge_context = knowledge
 

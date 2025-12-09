@@ -69,62 +69,36 @@ def load_generated_code(test_case: str) -> dict:
     return code
 
 
-def evaluate_default_mode(task, code: dict, output_dir: Path):
-    """
-    Default mode: 仅使用 kernel_src (element-wise 算子)
-    """
-    print("\n" + "-" * 50)
-    print("Mode 1: Default (kernel_src only)")
-    print("-" * 50)
-
-    if not code["kernel_src"]:
-        print("[SKIP] kernel_src not found")
-        return None
-
-    config = CANNSolutionConfig(
-        project_path=str(output_dir / "default_mode"),
-        block_dim=8,
-    )
-    solution = Solution(sol_string=code["kernel_src"], other_info=config.to_dict())
-
-    print("Evaluating...")
-    result = task.evaluate_solution(solution)
-
-    print(f"  Valid: {result.valid}")
-    print(f"  Stage: {result.additional_info.get('stage')}")
-
-    if result.valid:
-        runtime = result.additional_info.get('runtime')
-        if runtime:
-            print(f"  Runtime: {runtime:.4f} ms")
-    else:
-        error = result.additional_info.get('error', '')
-        print(f"  Error: {error[:200]}..." if len(error) > 200 else f"  Error: {error}")
-
-    return result
-
-
 def evaluate_full_mode(task, code: dict, output_dir: Path):
     """
     Full LLM mode: kernel + tiling + host + pybind
+    必须提供所有组件，不使用默认模板。
     """
     print("\n" + "-" * 50)
-    print("Mode 2: Full LLM (kernel + tiling + host + pybind)")
+    print("Full Mode Evaluation (kernel + tiling + host + pybind)")
     print("-" * 50)
 
+    # Check all required components
+    missing = []
     if not code["kernel_src"]:
-        print("[SKIP] kernel_src not found")
+        missing.append("kernel_src (op_kernel.cpp)")
+    if not code["tiling_src"]:
+        missing.append("tiling_src (tiling.h)")
+    if not code["operator_src"]:
+        missing.append("operator_src (op_host.cpp)")
+    if not code["pybind_src"]:
+        missing.append("pybind_src (pybind_src.cpp)")
+
+    if missing:
+        print(f"[ERROR] Missing required files:")
+        for m in missing:
+            print(f"  - {m}")
         return None
 
-    # Check what we have
-    has_tiling = code["tiling_src"] is not None
-    has_operator = code["operator_src"] is not None
-    has_pybind = code["pybind_src"] is not None
-
-    print(f"  kernel_src: Yes")
-    print(f"  tiling_src: {'Yes' if has_tiling else 'No (default)'}")
-    print(f"  operator_src: {'Yes' if has_operator else 'No (default)'}")
-    print(f"  pybind_src: {'Yes' if has_pybind else 'No (default)'}")
+    print(f"  kernel_src: {len(code['kernel_src'])} chars")
+    print(f"  tiling_src: {len(code['tiling_src'])} chars")
+    print(f"  operator_src: {len(code['operator_src'])} chars")
+    print(f"  pybind_src: {len(code['pybind_src'])} chars")
 
     config = CANNSolutionConfig(
         project_path=str(output_dir / "full_mode"),
@@ -146,7 +120,8 @@ def evaluate_full_mode(task, code: dict, output_dir: Path):
             print(f"  Runtime: {runtime:.4f} ms")
     else:
         error = result.additional_info.get('error', '')
-        print(f"  Error: {error[:200]}..." if len(error) > 200 else f"  Error: {error}")
+        # Print full error for debugging
+        print(f"  Error:\n{error}")
 
     return result
 
@@ -173,10 +148,6 @@ def main(test_case: str = "hard", npu_type: str = "Ascend910B2"):
         else:
             print(f"    - {key}: (not found)")
 
-    if not code["kernel_src"]:
-        print("\n[ERROR] kernel_src not found. Please run 5_joint_impl.py first.")
-        return
-
     # Create task
     print("\n[2] Creating evaluation task...")
     output_dir = ensure_output_dir(f"eval_{test_case}")
@@ -191,29 +162,22 @@ def main(test_case: str = "hard", npu_type: str = "Ascend910B2"):
     print(f"    Op: {op_name}")
     print(f"    NPU: {npu_type}")
 
-    # Evaluate
+    # Evaluate (Full mode only)
     print("\n[3] Running evaluation...")
-    default_result = evaluate_default_mode(task, code, output_dir)
-    full_result = evaluate_full_mode(task, code, output_dir)
+    result = evaluate_full_mode(task, code, output_dir)
 
     # Summary
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
 
-    if default_result:
-        print(f"  Default Mode:  {'PASS' if default_result.valid else 'FAIL'}")
+    if result:
+        status = 'PASS' if result.valid else 'FAIL'
+        print(f"  Result: {status}")
     else:
-        print(f"  Default Mode:  SKIP")
+        print(f"  Result: SKIP (missing files)")
 
-    if full_result:
-        print(f"  Full Mode:     {'PASS' if full_result.valid else 'FAIL'}")
-    else:
-        print(f"  Full Mode:     SKIP")
-
-    # Return success status
-    success = (full_result and full_result.valid) or (default_result and default_result.valid)
-    return success
+    return result and result.valid
 
 
 if __name__ == "__main__":

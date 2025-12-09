@@ -110,9 +110,12 @@ def get_knowledge_base():
 PHASE0_CONTEXT = {
     "easy": {
         "op_name": "Relu",
-        "signature": None,  # TODO: Fill after running 2_phase0.py
+        "signature": {'op_name': 'Relu', 'inputs': [{'name': 'x', 'dtype': 'float', 'is_tensor': True}], 'outputs': [{'name': 'output', 'dtype': 'float', 'is_tensor': True}], 'init_params': []},
         "compute_pattern": "element-wise",
-        "strategies": {"tiling": "default", "pybind": "generate"},
+        "output_equals_input_shape": True,
+        "shape_inference": {'input': '[*] (any shape)', 'output': 'same as input', 'formula': 'auto output_shape = x.sizes();'},
+        "functionality": 'Applies ReLU activation function max(0, x) element-wise to the input tensor, replacing all negative values with zero.',
+        "strategies": {'kernel': 'generate', 'tiling': 'default', 'pybind': 'default'},
     },
     "medium": {
         "op_name": "Softmax",
@@ -133,7 +136,74 @@ PHASE0_CONTEXT = {
 
 # Joint Plan output - fill after running 4_joint_planning.py
 JOINT_PLAN_CONTEXT = {
-    "easy": None,    # TODO: Fill after running 4_joint_planning.py
+    "easy": {
+        'tiling_strategy': 'custom',
+        'tiling_fields': [
+            {'name': 'block_dim', 'type': 'uint32_t', 'purpose': 'Number of AI cores to use (8)'},
+            {'name': 'tile_size', 'type': 'uint32_t', 'purpose': 'Elements per tile iteration (2048 float32 = 8KB)'},
+            {'name': 'total_length', 'type': 'uint32_t', 'purpose': 'Total number of elements (262144)'},
+            {'name': 'block_offset', 'type': 'uint32_t', 'purpose': 'Starting element index for this block'},
+            {'name': 'block_length', 'type': 'uint32_t', 'purpose': 'Number of elements this block processes'},
+        ],
+        'kernel_pseudocode': '''// Using tiling fields: tile_size, total_length, block_offset, block_length
+// Input shape: [batch_size, dim] = [16, 16384] flattened to total_elements = 262144
+// Each block processes block_length elements with internal tiling by tile_size
+
+const uint32_t TILE_SIZE = 2048;  // Process 2048 float32 elements per iteration (8KB)
+const uint32_t total_elements = batch_size * dim;
+const uint32_t elements_per_block = (total_elements + block_dim - 1) / block_dim;
+
+// Allocate double buffers in UB
+LocalTensor<float> input_buf_0 = AllocTensor<float>(TILE_SIZE);
+LocalTensor<float> input_buf_1 = AllocTensor<float>(TILE_SIZE);
+LocalTensor<float> output_buf_0 = AllocTensor<float>(TILE_SIZE);
+LocalTensor<float> output_buf_1 = AllocTensor<float>(TILE_SIZE);
+
+uint32_t block_start = block_idx * elements_per_block;
+uint32_t block_end = min(block_start + elements_per_block, total_elements);
+uint32_t num_tiles = (block_end - block_start + TILE_SIZE - 1) / TILE_SIZE;
+
+for (uint32_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+    uint32_t tile_offset = block_start + tile_idx * TILE_SIZE;
+    uint32_t current_tile_size = min(TILE_SIZE, total_elements - tile_offset);
+
+    uint32_t buf_idx = tile_idx % 2;
+    LocalTensor<float> input_buf = (buf_idx == 0) ? input_buf_0 : input_buf_1;
+    LocalTensor<float> output_buf = (buf_idx == 0) ? output_buf_0 : output_buf_1;
+
+    // CopyIn: Load input tile from GM to UB
+    DataCopy(input_buf, x_gm[tile_offset], current_tile_size);
+
+    // Compute: ReLU = max(x, 0)
+    Relu(output_buf, input_buf, current_tile_size);
+
+    // CopyOut: Store output tile from UB to GM
+    DataCopy(output_gm[tile_offset], output_buf, current_tile_size);
+}''',
+        'tiling_execution': '''total_elements = batch_size * dim = 16 * 16384 = 262144
+block_dim = 8
+elements_per_block = 262144 / 8 = 32768 elements per AI core
+tile_size = 2048 elements (8KB per buffer, 32KB total for double buffering)
+
+for each block (AI core) in range(0, 8):
+    block_start = block_idx * 32768
+    block_end = min(block_start + 32768, 262144)
+
+    for each tile in range(0, 16):  // 32768 / 2048 = 16 tiles per block
+        tile_offset = block_start + tile_idx * 2048
+        current_tile_size = min(2048, total_elements - tile_offset)
+
+        CopyIn: Load x[tile_offset : tile_offset + current_tile_size] from GM to UB
+        Compute: Apply ReLU activation (max with 0)
+        CopyOut: Store output[tile_offset : tile_offset + current_tile_size] from UB to GM''',
+        'retrieval_requests': [
+            {'type': 'api', 'name': 'DataCopy'},
+            {'type': 'api', 'name': 'Relu'},
+            {'type': 'api', 'name': 'Max'},
+            {'type': 'example', 'name': 'elementwise_relu'},
+            {'type': 'example', 'name': 'elementwise_add'},
+        ],
+    },
     "medium": None,  # TODO
     "hard": {
         'tiling_strategy': 'custom',
@@ -223,7 +293,33 @@ for (uint32_t b = batchStart; b < batchEnd; b++) {
 
 # Knowledge context - fill after running 4_joint_planning.py
 KNOWLEDGE_CONTEXT = {
-    "easy": "",    # TODO
+    "easy": """## API Reference
+
+### Relu
+- **Signature**: `void Relu(const LocalTensor<T>& dstLocal, const LocalTensor<T>& srcLocal, uint64_t mask[],
+    const uint8_t repeatTimes, const UnaryRepeatParams& repeatParams)`
+- **Description**: dst[i] = (src[i] < 0) ? 0 : src[i]
+
+### DataCopy
+- **Signature**: `void DataCopy(const LocalTensor<T>& dstLocal, const GlobalTensor<T>& srcGlobal,
+                                                     const Nd2NzParams& intriParams)`
+- **Description**: format transform(such as nd2nz) during data load from OUT to L1
+
+## Example Reference
+
+### relu
+**Purpose**: Element-wise ReLU activation (max(x, 0))
+
+**Mapping to Current Task**:
+- Example's input tensor → Current task's `x` (float tensor)
+- Example's output tensor → Current task's `output` (float tensor)
+- Example's computation `max(x, 0)` → Current task's `Relu(output_buf, input_buf, current_tile_size)`
+
+**Implementation Patterns**:
+- Data flow: GM → UB (DataCopy) → Compute (ReLU: max with 0) → UB → GM (DataCopy)
+- Pipeline: Double buffer optimization for overlapping I/O and computation
+- Element-wise activation using Ascend C's built-in `Relu` API for hardware acceleration
+""",
     "medium": "",  # TODO
     "hard": """## API Reference
 

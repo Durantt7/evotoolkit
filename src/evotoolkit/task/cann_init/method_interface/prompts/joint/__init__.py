@@ -68,10 +68,16 @@ class JointPromptMixin(TilingPromptsMixin, KernelPromptsMixin, ImplPromptsMixin)
     - TilingPromptsMixin: get_tiling_propose_prompt, _get_tiling_revise_prompt
     - KernelPromptsMixin: get_kernel_review_prompt, _get_kernel_re_review_prompt,
                           _get_kernel_final_round_prompt
-    - ImplPromptsMixin:
-        - get_tiling_header_prompt (Stage 1: tiling.h)
-        - get_tiling_host_prompt (Stage 2: op_host.cpp)
-        - get_kernel_impl_prompt (Stage 3: op_kernel.cpp)
+    - ImplPromptsMixin (new assemble pattern):
+        - Stage 1: tiling.h
+            - get_tiling_header_prompt() -> LLM returns field definitions
+            - assemble_tiling_header() -> produces complete tiling.h
+        - Stage 2: op_host.cpp
+            - get_tiling_host_prompt() -> LLM returns tiling_func_body + input_output_defs
+            - assemble_tiling_host() -> produces complete op_host.cpp
+        - Stage 3: op_kernel.cpp
+            - get_kernel_impl_prompt() -> LLM returns 9 tagged parts
+            - assemble_kernel_impl() -> produces complete op_kernel.cpp
     """
     pass
 

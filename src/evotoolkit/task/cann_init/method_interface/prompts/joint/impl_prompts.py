@@ -8,7 +8,10 @@ This module contains prompts for the three-stage code generation:
 2. Tiling Host (op_host.cpp) - Tiling calculation + InferShape
 3. Kernel (op_kernel.cpp) - Kernel implementation
 
-Each stage is generated separately to ensure quality and manageability.
+Design Pattern (following pybind.py):
+- Each stage has an `assemble_*` method that takes variable parts and produces complete code
+- Prompts ask LLM to generate ONLY the variable parts
+- Fixed structure is controlled programmatically, preventing LLM mistakes
 """
 
 from typing import List, Optional
@@ -47,6 +50,7 @@ def _format_joint_plan(plan: dict) -> dict:
     return {
         "tiling_strategy": plan.get("tiling_strategy", "default"),
         "tiling_fields": _format_tiling_fields(plan.get("tiling_fields", [])),
+        "tiling_fields_raw": plan.get("tiling_fields", []),
         "tiling_execution": plan.get("tiling_execution", "(not specified)"),
         "kernel_pseudocode": plan.get("kernel_pseudocode", "(not specified)"),
         "kernel_design": plan.get("kernel_design", "(not specified)"),
@@ -57,23 +61,59 @@ def _format_joint_plan(plan: dict) -> dict:
 class ImplPromptsMixin:
     """Prompts for three-stage code implementation.
 
-    Stage 1: get_tiling_header_prompt() -> tiling.h (NO knowledge needed)
-    Stage 2: get_tiling_host_prompt() -> op_host.cpp
-    Stage 3: get_kernel_impl_prompt() -> op_kernel.cpp
+    Design Pattern (following pybind.py):
+    - `assemble_*` methods: Take variable parts, produce complete code
+    - `get_*_prompt` methods: Ask LLM for only the variable parts
 
-    For default tiling strategy, only Stage 3 is needed.
+    Stage 1: tiling.h
+        - assemble_tiling_header() + get_tiling_header_prompt()
+        - Variable: field definitions only
+
+    Stage 2: op_host.cpp
+        - assemble_tiling_host() + get_tiling_host_prompt()
+        - Variable: TilingFunc body, Input/Output definitions
+
+    Stage 3: op_kernel.cpp
+        - assemble_kernel_impl() + get_kernel_impl_prompt()
+        - Variable: Init/Process/CopyIn/Compute/CopyOut bodies, member variables
     """
 
     # =========================================================================
-    # Stage 1: Tiling Header (tiling.h) - NO knowledge needed
+    # Stage 1: Tiling Header (tiling.h)
     # =========================================================================
+
+    def assemble_tiling_header(
+        self,
+        op_name: str,
+        field_definitions: str,
+    ) -> str:
+        """Assemble complete tiling.h from field definitions.
+
+        Args:
+            op_name: Operator name (e.g., "SDPA")
+            field_definitions: Field definition lines from LLM
+                Example: "    TILING_DATA_FIELD_DEF(uint32_t, batchSize);\n    ..."
+
+        Returns:
+            Complete tiling.h source code
+        """
+        return f"""#include "register/tilingdata_base.h"
+
+namespace optiling {{
+BEGIN_TILING_DATA_DEF({op_name}TilingData)
+{field_definitions}
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS({op_name}, {op_name}TilingData)
+}}
+"""
 
     def get_tiling_header_prompt(
         self,
         plan: dict,
         context: dict,
     ) -> str:
-        """Generate prompt for tiling.h (tiling data structure).
+        """Generate prompt for tiling.h field definitions.
 
         NOTE: This stage does NOT need knowledge - it's pure structure definition.
 
@@ -82,17 +122,20 @@ class ImplPromptsMixin:
             context: Contains 'signature', 'op_name', etc.
 
         Returns:
-            Prompt string for generating tiling.h
+            Prompt string for generating tiling.h field definitions
         """
         formatted = _format_joint_plan(plan)
         op_name = context.get("op_name", "CustomOp")
         formatted_sig = _format_signature(context.get("signature"))
 
+        # Show the template with placeholder
+        template_code = self.assemble_tiling_header(op_name, "    // === YOUR FIELD DEFINITIONS HERE ===")
+
         return f"""## Role
 You are an Ascend C expert generating the **tiling.h** header file.
 
 ## Task
-Define the tiling data structure based on the joint plan.
+Define the tiling data structure fields based on the joint plan.
 
 ## Input
 
@@ -109,60 +152,102 @@ Define the tiling data structure based on the joint plan.
 {formatted["tiling_execution"]}
 ```
 
-## Output Format
+## Fixed Code (you cannot modify)
 
-Output a single code block containing the complete tiling.h file.
-
-### Fixed Structure (DO NOT modify)
 ```cpp
-#include "register/tilingdata_base.h"
+{template_code}```
 
-namespace optiling {{
-BEGIN_TILING_DATA_DEF({op_name}TilingData)
-    // <VARIABLE: field definitions go here>
-END_TILING_DATA_DEF;
+## Your Task
 
-REGISTER_TILING_DATA_CLASS({op_name}, {op_name}TilingData)
-}}
-```
+Output ONLY the field definitions that replace `// === YOUR FIELD DEFINITIONS HERE ===`.
 
-### Variable Parts
-| Part | Format | Example |
-|------|--------|---------|
-| Field definition | `TILING_DATA_FIELD_DEF(type, name);` | `TILING_DATA_FIELD_DEF(uint32_t, totalLength);` |
-| Supported types | `uint32_t`, `int32_t`, `float`, `uint64_t` | - |
+### Field Format
+Each field must use: `TILING_DATA_FIELD_DEF(type, name);`
 
-## Rules
-1. Include ALL fields from "Tiling Fields" section
-2. Field names must be valid C++ identifiers (camelCase recommended)
-3. One `TILING_DATA_FIELD_DEF` per line, with semicolon
-4. No comments needed inside the struct
+Supported types: `uint32_t`, `int32_t`, `float`, `uint64_t`
+
+## Response Format
+
+<response>
+    TILING_DATA_FIELD_DEF(uint32_t, fieldName1);
+    TILING_DATA_FIELD_DEF(uint32_t, fieldName2);
+    ...
+</response>
 
 ## Example
 
-Input: Softmax with fields `batchSize`, `featureDim`, `rowsPerCore`
+For Softmax with fields `batchSize`, `featureDim`, `rowsPerCore`:
 
-Output:
-```cpp
-#include "register/tilingdata_base.h"
-
-namespace optiling {{
-BEGIN_TILING_DATA_DEF(SoftmaxTilingData)
+<response>
     TILING_DATA_FIELD_DEF(uint32_t, batchSize);
     TILING_DATA_FIELD_DEF(uint32_t, featureDim);
     TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
-END_TILING_DATA_DEF;
+</response>
 
-REGISTER_TILING_DATA_CLASS(Softmax, SoftmaxTilingData)
-}}
-```
-
-Now generate the tiling.h for `{op_name}`:
+Now output the field definitions for `{op_name}`. Output ONLY the `<response>` block:
 """
 
     # =========================================================================
     # Stage 2: Tiling Host (op_host.cpp)
     # =========================================================================
+
+    def assemble_tiling_host(
+        self,
+        op_name: str,
+        tiling_func_body: str,
+        input_output_defs: str,
+        infer_shape_body: str = "",
+    ) -> str:
+        """Assemble complete op_host.cpp from variable parts.
+
+        Args:
+            op_name: Operator name (e.g., "SDPA")
+            tiling_func_body: TilingFunc body from LLM (calculation logic)
+            input_output_defs: Input/Output definitions from LLM
+            infer_shape_body: InferShape body from LLM (optional, defaults to output=input)
+
+        Returns:
+            Complete op_host.cpp source code
+        """
+        op_lower = op_name.lower()
+
+        # Default InferShape: output shape = input shape
+        if not infer_shape_body or not infer_shape_body.strip():
+            infer_shape_body = """    const gert::Shape* x1_shape = context->GetInputShape(0);
+    gert::Shape* y_shape = context->GetOutputShape(0);
+    *y_shape = *x1_shape;"""
+
+        return f"""#include "{op_lower}_custom_tiling.h"
+#include "register/op_def_registry.h"
+#include "tiling/platform/platform_ascendc.h"
+
+namespace optiling {{
+
+static ge::graphStatus TilingFunc(gert::TilingContext* context) {{
+{tiling_func_body}
+    return ge::GRAPH_SUCCESS;
+}}
+}}
+
+namespace ge {{
+static ge::graphStatus InferShape(gert::InferShapeContext* context) {{
+{infer_shape_body}
+    return GRAPH_SUCCESS;
+}}
+}}
+
+namespace ops {{
+class {op_name} : public OpDef {{
+public:
+    explicit {op_name}(const char* name) : OpDef(name) {{
+{input_output_defs}
+        this->SetInferShape(ge::InferShape)
+            .SetTiling(optiling::TilingFunc);
+    }}
+}};
+OP_ADD({op_name});
+}}
+"""
 
     def get_tiling_host_prompt(
         self,
@@ -171,27 +256,54 @@ Now generate the tiling.h for `{op_name}`:
         knowledge: str,
         tiling_header: str,
     ) -> str:
-        """Generate prompt for op_host.cpp (tiling calculation + InferShape).
+        """Generate prompt for op_host.cpp variable parts.
+
+        Context Design (IMPORTANT):
+        - DO NOT include python_ref: tiling_execution already contains the
+          translated logic. Including python_ref would be redundant and may
+          confuse the LLM with inconsistent representations.
+        - DO NOT include tiling_proposal: it's the discussion process,
+          tiling_execution is the final agreed result.
+
+        Required context:
+        - tiling_header: field names from Stage 1
+        - tiling_execution: how to calculate tiling parameters
+        - signature: for Input/Output definitions
+        - knowledge: API syntax reference
 
         Args:
             plan: Joint plan dict
-            context: Contains 'signature', 'op_name', 'python_ref', etc.
+            context: Contains 'signature', 'op_name', etc.
             knowledge: Retrieved knowledge context
             tiling_header: Generated tiling.h content from Stage 1
 
         Returns:
-            Prompt string for generating op_host.cpp
+            Prompt string for generating op_host.cpp variable parts
         """
         formatted = _format_joint_plan(plan)
         op_name = context.get("op_name", "CustomOp")
         formatted_sig = _format_signature(context.get("signature"))
-        python_ref = context.get("python_ref", "")
+        # NOTE: python_ref is intentionally NOT used here.
+        # tiling_execution already contains the translated calculation logic.
+
+        # Show the template with placeholders
+        template_code = self.assemble_tiling_host(
+            op_name,
+            "    // === TILING_FUNC_BODY ===",
+            "        // === INPUT_OUTPUT_DEFS ===",
+            ""  # InferShape is auto-translated from pybind
+        )
+
+        # Shape inference note (InferShape is now handled by InferShapeTranslator)
+        shape_section = """### Shape Inference
+- InferShape is auto-generated from pybind branch output
+- You do NOT need to provide shape inference code"""
 
         return f"""## Role
 You are an Ascend C host-side development expert generating the **op_host.cpp** file.
 
 ## Task
-Implement tiling calculation logic and operator registration.
+Implement tiling calculation logic and operator input/output definitions.
 
 ## Input
 
@@ -200,18 +312,13 @@ Implement tiling calculation logic and operator registration.
 - Signature:
 {formatted_sig}
 
-### Python Reference
-```python
-{python_ref}
-```
+{shape_section}
 
 ### Tiling Execution (from Joint Plan)
+This describes how to calculate each tiling field:
 ```
 {formatted["tiling_execution"]}
 ```
-
-### Tiling Design (from Joint Plan)
-{formatted["tiling_proposal"]}
 
 ### Generated tiling.h (Stage 1 output)
 ```cpp
@@ -221,66 +328,61 @@ Implement tiling calculation logic and operator registration.
 ### Available Knowledge
 {knowledge}
 
-## Output Format
+## Fixed Code (you cannot modify structure)
 
-Output a single code block containing the complete op_host.cpp file.
-
-### Fixed Structure (DO NOT modify skeleton)
 ```cpp
-#include "{op_name.lower()}_tiling.h"
-#include "register/op_def_registry.h"
-#include "tiling/platform/platform_ascendc.h"
+{template_code}```
 
-namespace optiling {{
+## Your Task
 
-static ge::graphStatus TilingFunc(gert::TilingContext* context) {{
-    // <VARIABLE: tiling calculation logic>
-    return ge::GRAPH_SUCCESS;
-}}
-}}
+Provide the following 2 parts:
 
-namespace ops {{
-class {op_name} : public OpDef {{
-public:
-    explicit {op_name}(const char* name) : OpDef(name) {{
-        // <VARIABLE: input/output definitions>
-        // <VARIABLE: InferShape and Tiling registration>
-    }}
-}};
-OP_ADD({op_name});
-}}
-```
+### Part 1: TILING_FUNC_BODY (required)
+The body of TilingFunc (excluding return statement).
+Must include:
+- Shape extraction: `context->GetInputShape(i)->GetStorageShape()`
+- Tiling calculation logic
+- Create and populate tiling struct: `{op_name}TilingData tiling;`
+- Set fields: `tiling.set_fieldName(value);`
+- Set block dim: `context->SetBlockDim(n);`
+- Save tiling (fixed pattern below)
 
-### Variable Parts
-
-| Part | Pattern | Example |
-|------|---------|---------|
-| Get shape | `context->GetInputShape(i)->GetStorageShape()` | `auto shape = context->GetInputShape(0)->GetStorageShape();` |
-| Get dim | `shape.GetDim(i)` | `uint32_t batchSize = shape.GetDim(0);` |
-| Set field | `tiling.set_<fieldName>(value)` | `tiling.set_batchSize(batchSize);` |
-| Set block_dim | `context->SetBlockDim(n)` | `context->SetBlockDim(8);` |
-| Save tiling | See below | - |
-| Define input | `.Input("name").ParamType(REQUIRED).DataType({{...}})` | `.Input("x").ParamType(REQUIRED).DataType({{ge::DT_FLOAT16}})` |
-| Define output | `.Output("name").ParamType(REQUIRED).DataType({{...}})` | `.Output("y").ParamType(REQUIRED).DataType({{ge::DT_FLOAT16}})` |
-| Register | `.SetInferShape(ge::InferShape).SetTiling(optiling::TilingFunc)` | - |
-
-### Save Tiling Pattern (fixed)
+Save Tiling Pattern (always use this):
 ```cpp
 tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                     context->GetRawTilingData()->GetCapacity());
 context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
 ```
 
+### Part 2: INPUT_OUTPUT_DEFS (required)
+Input and output definitions for the OpDef class.
+Pattern:
+- Input: `this->Input("name").ParamType(REQUIRED).DataType({{ge::DT_FLOAT}});`
+- Output: `this->Output("name").ParamType(REQUIRED).DataType({{ge::DT_FLOAT}});`
+
+## Response Format
+
+<tiling_func_body>
+    auto shape = context->GetInputShape(0)->GetStorageShape();
+    uint32_t dim0 = shape.GetDim(0);
+    ...
+    {op_name}TilingData tiling;
+    tiling.set_field1(value1);
+    ...
+    context->SetBlockDim(8);
+    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
+                        context->GetRawTilingData()->GetCapacity());
+    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
+</tiling_func_body>
+
+<input_output_defs>
+        this->Input("x").ParamType(REQUIRED).DataType({{ge::DT_FLOAT}});
+        this->Output("y").ParamType(REQUIRED).DataType({{ge::DT_FLOAT}});
+</input_output_defs>
+
 ## Example (Softmax)
 
-```cpp
-#include "softmax_tiling.h"
-#include "register/op_def_registry.h"
-#include "tiling/platform/platform_ascendc.h"
-
-namespace optiling {{
-
-static ge::graphStatus TilingFunc(gert::TilingContext* context) {{
+<tiling_func_body>
     auto shape = context->GetInputShape(0)->GetStorageShape();
     uint32_t batchSize = shape.GetDim(0);
     uint32_t featureDim = shape.GetDim(1);
@@ -296,34 +398,91 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {{
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
                         context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-    return ge::GRAPH_SUCCESS;
-}}
-}}
+</tiling_func_body>
 
-namespace ops {{
-class Softmax : public OpDef {{
-public:
-    explicit Softmax(const char* name) : OpDef(name) {{
-        this->Input("x")
-            .ParamType(REQUIRED)
-            .DataType({{ge::DT_FLOAT16, ge::DT_FLOAT}});
-        this->Output("y")
-            .ParamType(REQUIRED)
-            .DataType({{ge::DT_FLOAT16, ge::DT_FLOAT}});
-        this->SetInferShape(ge::InferShape)
-            .SetTiling(optiling::TilingFunc);
-    }}
-}};
-OP_ADD(Softmax);
-}}
-```
+<input_output_defs>
+        this->Input("x").ParamType(REQUIRED).DataType({{ge::DT_FLOAT16, ge::DT_FLOAT}});
+        this->Output("y").ParamType(REQUIRED).DataType({{ge::DT_FLOAT16, ge::DT_FLOAT}});
+</input_output_defs>
 
-Now generate the op_host.cpp for `{op_name}`:
+Now output the 2 parts for `{op_name}`:
 """
 
     # =========================================================================
     # Stage 3: Kernel Implementation (op_kernel.cpp)
     # =========================================================================
+
+    def assemble_kernel_impl(
+        self,
+        op_name: str,
+        init_params: str,
+        init_body: str,
+        process_body: str,
+        copyin_body: str,
+        compute_body: str,
+        copyout_body: str,
+        member_vars: str,
+        global_func_params: str,
+        init_call_args: str,
+    ) -> str:
+        """Assemble complete op_kernel.cpp from variable parts.
+
+        Args:
+            op_name: Operator name (e.g., "SDPA")
+            init_params: Init function parameters
+            init_body: Init function body
+            process_body: Process function body
+            copyin_body: CopyIn function body
+            compute_body: Compute function body
+            copyout_body: CopyOut function body
+            member_vars: Member variable declarations
+            global_func_params: Parameters for the global function (before workspace, tiling)
+            init_call_args: Arguments passed to op.Init()
+
+        Returns:
+            Complete op_kernel.cpp source code
+        """
+        op_lower = op_name.lower()
+
+        return f"""#include "kernel_operator.h"
+
+using namespace AscendC;
+
+constexpr int32_t BUFFER_NUM = 2;
+
+class Kernel{op_name} {{
+public:
+    __aicore__ inline Kernel{op_name}() {{}}
+    __aicore__ inline void Init({init_params}) {{
+{init_body}
+    }}
+    __aicore__ inline void Process() {{
+{process_body}
+    }}
+
+private:
+    __aicore__ inline void CopyIn(int32_t progress) {{
+{copyin_body}
+    }}
+    __aicore__ inline void Compute(int32_t progress) {{
+{compute_body}
+    }}
+    __aicore__ inline void CopyOut(int32_t progress) {{
+{copyout_body}
+    }}
+
+private:
+{member_vars}
+}};
+
+extern "C" __global__ __aicore__ void {op_lower}_custom(
+    {global_func_params}GM_ADDR workspace, GM_ADDR tiling) {{
+    GET_TILING_DATA(tilingData, tiling);
+    Kernel{op_name} op;
+    op.Init({init_call_args});
+    op.Process();
+}}
+"""
 
     def get_kernel_impl_prompt(
         self,
@@ -332,21 +491,35 @@ Now generate the op_host.cpp for `{op_name}`:
         knowledge: str,
         tiling_header: Optional[str] = None,
     ) -> str:
-        """Generate prompt for op_kernel.cpp (kernel implementation).
+        """Generate prompt for op_kernel.cpp variable parts.
+
+        Context Design (IMPORTANT):
+        - DO NOT include python_ref: kernel_pseudocode already contains the
+          translated computation logic. Including python_ref would be redundant
+          and may confuse the LLM with inconsistent representations.
+        - DO NOT include kernel_design: it's the discussion process,
+          kernel_pseudocode is the final agreed implementation plan.
+
+        Required context:
+        - kernel_pseudocode: the computation logic to implement
+        - tiling_execution: loop structure and data flow
+        - tiling_header: available tiling parameters
+        - knowledge: API syntax reference (IMPORTANT for correct API usage)
 
         Args:
             plan: Joint plan dict
-            context: Contains 'signature', 'op_name', 'python_ref', etc.
+            context: Contains 'signature', 'op_name', etc.
             knowledge: Retrieved knowledge context
             tiling_header: Generated tiling.h content (None for default tiling)
 
         Returns:
-            Prompt string for generating op_kernel.cpp
+            Prompt string for generating op_kernel.cpp variable parts
         """
         formatted = _format_joint_plan(plan)
         op_name = context.get("op_name", "CustomOp")
         formatted_sig = _format_signature(context.get("signature"))
-        python_ref = context.get("python_ref", "")
+        # NOTE: python_ref is intentionally NOT used here.
+        # kernel_pseudocode already contains the translated computation logic.
         tiling_strategy = formatted["tiling_strategy"]
 
         # Tiling header section
@@ -363,11 +536,25 @@ Standard tiling parameters available via `GET_TILING_DATA`:
 - `tileLength`: elements per tile
 - `lasttileLength`: elements in last tile (may differ)"""
 
+        # Show the template with placeholders
+        template_code = self.assemble_kernel_impl(
+            op_name,
+            "/* INIT_PARAMS */",
+            "        // INIT_BODY",
+            "        // PROCESS_BODY",
+            "        // COPYIN_BODY",
+            "        // COMPUTE_BODY",
+            "        // COPYOUT_BODY",
+            "    // MEMBER_VARS",
+            "/* GLOBAL_FUNC_PARAMS */ ",
+            "/* INIT_CALL_ARGS */"
+        )
+
         return f"""## Role
 You are an Ascend C kernel development expert generating the **op_kernel.cpp** file.
 
 ## Task
-Implement the kernel based on the joint plan and pseudocode.
+Implement the kernel based on the pseudocode and tiling execution plan.
 
 ## Input
 
@@ -376,24 +563,18 @@ Implement the kernel based on the joint plan and pseudocode.
 - Signature:
 {formatted_sig}
 
-### Python Reference
-```python
-{python_ref}
-```
-
 ### Tiling Strategy: `{tiling_strategy}`
 
 {tiling_section}
 
-### Kernel Design (from Joint Plan)
-{formatted["kernel_design"]}
-
 ### Kernel Pseudocode (from Joint Plan)
+This is the computation logic you need to implement:
 ```
 {formatted["kernel_pseudocode"]}
 ```
 
 ### Tiling Execution (from Joint Plan)
+This describes the loop structure and data flow:
 ```
 {formatted["tiling_execution"]}
 ```
@@ -401,52 +582,43 @@ Implement the kernel based on the joint plan and pseudocode.
 ### Available Knowledge
 {knowledge}
 
-## Output Format
+## Fixed Code Structure (you cannot modify)
 
-Output a single code block containing the complete op_kernel.cpp file.
-
-### Fixed Structure (DO NOT modify skeleton)
 ```cpp
-#include "kernel_operator.h"
+{template_code}```
 
-using namespace AscendC;
+## Your Task
 
-constexpr int32_t BUFFER_NUM = 2;
+Provide the following 9 parts:
 
-class Kernel{op_name} {{
-public:
-    __aicore__ inline Kernel{op_name}() {{}}
-    __aicore__ inline void Init(/* <VARIABLE: GM_ADDR params, tiling params> */) {{
-        // <VARIABLE: initialization>
-    }}
-    __aicore__ inline void Process() {{
-        // <VARIABLE: main loop>
-    }}
+### 1. INIT_PARAMS
+Function parameters for Init (e.g., `GM_ADDR x, GM_ADDR y, uint32_t totalLength`)
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress) {{
-        // <VARIABLE: GM -> local>
-    }}
-    __aicore__ inline void Compute(int32_t progress) {{
-        // <VARIABLE: compute>
-    }}
-    __aicore__ inline void CopyOut(int32_t progress) {{
-        // <VARIABLE: local -> GM>
-    }}
+### 2. INIT_BODY
+Body of Init function (GlobalTensor setup, pipe initialization)
 
-    // <VARIABLE: member variables>
-}};
+### 3. PROCESS_BODY
+Body of Process function (main loop calling CopyIn/Compute/CopyOut)
 
-extern "C" __global__ __aicore__ void {op_name.lower()}_custom(
-    /* <VARIABLE: GM_ADDR inputs, outputs> */ GM_ADDR workspace, GM_ADDR tiling) {{
-    GET_TILING_DATA(tilingData, tiling);
-    Kernel{op_name} op;
-    op.Init(/* <VARIABLE: pass params> */);
-    op.Process();
-}}
-```
+### 4. COPYIN_BODY
+Body of CopyIn function (GM -> local memory)
 
-### Variable Parts
+### 5. COMPUTE_BODY
+Body of Compute function (actual computation)
+
+### 6. COPYOUT_BODY
+Body of CopyOut function (local -> GM memory)
+
+### 7. MEMBER_VARS
+Private member variable declarations
+
+### 8. GLOBAL_FUNC_PARAMS
+Parameters for extern "C" function (before `GM_ADDR workspace, GM_ADDR tiling`)
+
+### 9. INIT_CALL_ARGS
+Arguments passed to op.Init() call
+
+## API Patterns
 
 | Part | Pattern | Example |
 |------|---------|---------|
@@ -461,7 +633,7 @@ extern "C" __global__ __aicore__ void {op_name.lower()}_custom(
 | FreeTensor | `queue.FreeTensor(tensor)` | `inQueue.FreeTensor(xLocal);` |
 | Get tiling | `tilingData.<field>` | `tilingData.totalLength` |
 
-### Member Variable Patterns
+## Member Variable Types
 
 | Type | Declaration |
 |------|-------------|
@@ -471,50 +643,41 @@ extern "C" __global__ __aicore__ void {op_name.lower()}_custom(
 | Global tensor | `GlobalTensor<half> xGm;` |
 | Tiling param | `uint32_t tileNum;` |
 
-## Example (element-wise Add)
+## Response Format
 
-```cpp
-#include "kernel_operator.h"
+<init_params>
+GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t totalLength, uint32_t tileNum
+</init_params>
 
-using namespace AscendC;
-
-constexpr int32_t BUFFER_NUM = 2;
-
-class KernelAdd {{
-public:
-    __aicore__ inline KernelAdd() {{}}
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z,
-                                 uint32_t totalLength, uint32_t tileNum) {{
+<init_body>
         xGm.SetGlobalBuffer((__gm__ half*)x);
         yGm.SetGlobalBuffer((__gm__ half*)y);
         zGm.SetGlobalBuffer((__gm__ half*)z);
         this->tileNum = tileNum;
         this->tileLength = totalLength / tileNum;
-
         pipe.InitBuffer(inQueueX, BUFFER_NUM, tileLength * sizeof(half));
         pipe.InitBuffer(inQueueY, BUFFER_NUM, tileLength * sizeof(half));
         pipe.InitBuffer(outQueue, BUFFER_NUM, tileLength * sizeof(half));
-    }}
+</init_body>
 
-    __aicore__ inline void Process() {{
+<process_body>
         for (int32_t i = 0; i < tileNum; i++) {{
             CopyIn(i);
             Compute(i);
             CopyOut(i);
         }}
-    }}
+</process_body>
 
-private:
-    __aicore__ inline void CopyIn(int32_t progress) {{
+<copyin_body>
         LocalTensor<half> xLocal = inQueueX.AllocTensor<half>();
         LocalTensor<half> yLocal = inQueueY.AllocTensor<half>();
         DataCopy(xLocal, xGm[progress * tileLength], tileLength);
         DataCopy(yLocal, yGm[progress * tileLength], tileLength);
         inQueueX.EnQue(xLocal);
         inQueueY.EnQue(yLocal);
-    }}
+</copyin_body>
 
-    __aicore__ inline void Compute(int32_t progress) {{
+<compute_body>
         LocalTensor<half> xLocal = inQueueX.DeQue<half>();
         LocalTensor<half> yLocal = inQueueY.DeQue<half>();
         LocalTensor<half> zLocal = outQueue.AllocTensor<half>();
@@ -522,33 +685,32 @@ private:
         outQueue.EnQue(zLocal);
         inQueueX.FreeTensor(xLocal);
         inQueueY.FreeTensor(yLocal);
-    }}
+</compute_body>
 
-    __aicore__ inline void CopyOut(int32_t progress) {{
+<copyout_body>
         LocalTensor<half> zLocal = outQueue.DeQue<half>();
         DataCopy(zGm[progress * tileLength], zLocal, tileLength);
         outQueue.FreeTensor(zLocal);
-    }}
+</copyout_body>
 
-private:
+<member_vars>
     TPipe pipe;
     TQue<QuePosition::VECIN, BUFFER_NUM> inQueueX, inQueueY;
     TQue<QuePosition::VECOUT, BUFFER_NUM> outQueue;
     GlobalTensor<half> xGm, yGm, zGm;
     uint32_t tileNum;
     uint32_t tileLength;
-}};
+</member_vars>
 
-extern "C" __global__ __aicore__ void add_custom(
-    GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR workspace, GM_ADDR tiling) {{
-    GET_TILING_DATA(tilingData, tiling);
-    KernelAdd op;
-    op.Init(x, y, z, tilingData.totalLength, tilingData.tileNum);
-    op.Process();
-}}
-```
+<global_func_params>
+GM_ADDR x, GM_ADDR y, GM_ADDR z,
+</global_func_params>
 
-Now generate the op_kernel.cpp for `{op_name}`:
+<init_call_args>
+x, y, z, tilingData.totalLength, tilingData.tileNum
+</init_call_args>
+
+Now output all 9 parts for `{op_name}`:
 """
 
     # =========================================================================

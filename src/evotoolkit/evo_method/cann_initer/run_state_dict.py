@@ -22,6 +22,7 @@ class CANNIniterRunStateDict:
         functionality: Optional[str] = None,
         strategies: Optional[Dict[str, str]] = None,
         # Parallel branch outputs
+        shape_inference_code: Optional[str] = None,  # PyTorch shape code for translation
         pybind_src: Optional[str] = None,
         kernel_src: Optional[str] = None,
         tiling_src: Optional[str] = None,
@@ -49,6 +50,7 @@ class CANNIniterRunStateDict:
         self.strategies = strategies or {}
 
         # Parallel branch outputs
+        self.shape_inference_code = shape_inference_code
         self.pybind_src = pybind_src
         self.kernel_src = kernel_src
         self.tiling_src = tiling_src

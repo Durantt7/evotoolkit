@@ -66,6 +66,9 @@ class PybindBranch:
             shape_inference_code = _parse_response(response)
             self._verbose(f"[Pybind] Shape inference: {shape_inference_code}")
 
+        # Save shape inference code for InferShape translation
+        self.run_state_dict.shape_inference_code = shape_inference_code
+
         # Assemble complete pybind source code
         self.run_state_dict.pybind_src = self.config.interface.assemble_pybind_code(
             signature=signature,

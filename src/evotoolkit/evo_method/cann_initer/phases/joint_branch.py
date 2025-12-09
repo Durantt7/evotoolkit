@@ -6,7 +6,7 @@
 import re
 from typing import TYPE_CHECKING, List
 
-from ..parsers import parse_code
+from ..parsers import parse_code, parse_tag, parse_multiple_tags
 
 if TYPE_CHECKING:
     from ..run_config import CANNIniterConfig
@@ -511,8 +511,54 @@ class JointBranch:
         self.run_state_dict.knowledge_context = summarized.get("combined_context", "")
         self.run_state_dict.retrieval_plan = plan_result
 
+    def _get_infer_shape_body(self) -> str:
+        """获取 InferShape body（从 pybind 的 shape_inference_code 翻译）
+
+        逻辑：
+        1. 如果 output_equals_input_shape = true：返回空（使用默认模板）
+        2. 如果有 shape_inference_code：翻译成 Ascend 格式
+        3. 如果没有：返回空（使用默认模板）
+        """
+        # Same shape case: use default template in assemble_tiling_host
+        if self.run_state_dict.output_equals_input_shape:
+            self._verbose("[Joint] InferShape: using default (output = input)")
+            return ""
+
+        # Get shape_inference_code from pybind branch
+        shape_code = getattr(self.run_state_dict, 'shape_inference_code', None)
+        if not shape_code:
+            self._verbose("[Joint] InferShape: no shape_inference_code, using default")
+            return ""
+
+        # Translate using InferShapeTranslator
+        from .infer_shape_translator import InferShapeTranslator
+
+        # Create LLM callback
+        llm_call = None
+        if self.config.running_llm:
+            def llm_call(prompt: str) -> str:
+                response, _ = self.config.running_llm.get_response(prompt)
+                return response
+
+        translator = InferShapeTranslator(llm_client=llm_call)
+        signature = self.run_state_dict.signature
+        sig_dict = signature.to_dict() if hasattr(signature, 'to_dict') else (signature or {})
+
+        infer_shape_body = translator.translate(
+            shape_inference_code=shape_code,
+            signature=sig_dict,
+            output_equals_input_shape=self.run_state_dict.output_equals_input_shape,
+        )
+        self._verbose(f"[Joint] InferShape: translated from pybind shape code")
+        return infer_shape_body
+
     def _implement_code(self, python_ref: str):
-        """三阶段代码实现
+        """三阶段代码实现 (使用 assemble 模式)
+
+        新设计模式：
+        - Prompt 只要求 LLM 生成变量部分
+        - 使用 assemble_* 方法组装完整代码
+        - 固定结构由程序控制，防止 LLM 生成错误
 
         Stage 1: tiling.h (仅 custom tiling)
         Stage 2: op_host.cpp (仅 custom tiling)
@@ -521,11 +567,18 @@ class JointBranch:
         使用 knowledge_context（KnowledgeSummarizer 的输出）作为知识上下文
         """
         # 准备 context
+        # NOTE: python_ref is included in context for completeness, but the prompt
+        # functions intentionally DO NOT use it. The pseudocode/execution from
+        # Joint Plan already contains the translated logic, making python_ref
+        # redundant and potentially confusing for the LLM.
         context = {
             "op_name": self.run_state_dict.op_name,
             "signature": self.run_state_dict.signature,
-            "python_ref": python_ref,
+            "python_ref": python_ref,  # Available but not used by prompts
+            "shape_inference": self.run_state_dict.shape_inference,
+            "output_equals_input_shape": self.run_state_dict.output_equals_input_shape,
         }
+        op_name = self.run_state_dict.op_name
         knowledge = self.run_state_dict.knowledge_context
         plan = self.run_state_dict.joint_plan
         tiling_header = None
@@ -539,23 +592,76 @@ class JointBranch:
             # Custom tiling: 三阶段生成
 
             # Stage 1: 生成 tiling.h
+            self._verbose("[Joint] Stage 1: Generating tiling.h...")
             tiling_header_prompt = self.config.interface.get_tiling_header_prompt(
                 plan, context
             )
             response, _ = self.config.running_llm.get_response(tiling_header_prompt)
-            tiling_header = parse_code(response)
+
+            # 解析 <response> 标签，组装完整代码
+            field_definitions = parse_tag(response, "response")
+            if not field_definitions:
+                # 回退：尝试解析代码块
+                field_definitions = parse_code(response)
+
+            tiling_header = self.config.interface.assemble_tiling_header(
+                op_name, field_definitions
+            )
             self.run_state_dict.tiling_src = tiling_header
 
             # Stage 2: 生成 op_host.cpp
+            self._verbose("[Joint] Stage 2: Generating op_host.cpp...")
             tiling_host_prompt = self.config.interface.get_tiling_host_prompt(
                 plan, context, knowledge, tiling_header
             )
             response, _ = self.config.running_llm.get_response(tiling_host_prompt)
-            self.run_state_dict.operator_src = parse_code(response)
+
+            # 解析标签，组装完整代码
+            tiling_func_body = parse_tag(response, "tiling_func_body")
+            input_output_defs = parse_tag(response, "input_output_defs")
+
+            # InferShape: 从 pybind 的 shape_inference_code 翻译
+            infer_shape_body = self._get_infer_shape_body()
+
+            if not tiling_func_body:
+                # 回退：尝试解析代码块
+                self._verbose("[Joint] Warning: Failed to parse tiling_func_body tag, falling back to code block")
+                self.run_state_dict.operator_src = parse_code(response)
+            else:
+                self.run_state_dict.operator_src = self.config.interface.assemble_tiling_host(
+                    op_name, tiling_func_body, input_output_defs, infer_shape_body
+                )
 
         # Stage 3: 生成 op_kernel.cpp (总是需要)
+        self._verbose("[Joint] Stage 3: Generating op_kernel.cpp...")
         kernel_prompt = self.config.interface.get_kernel_impl_prompt(
             plan, context, knowledge, tiling_header
         )
         response, _ = self.config.running_llm.get_response(kernel_prompt)
-        self.run_state_dict.kernel_src = parse_code(response)
+
+        # 解析 9 个标签
+        kernel_tags = [
+            "init_params", "init_body", "process_body",
+            "copyin_body", "compute_body", "copyout_body",
+            "member_vars", "global_func_params", "init_call_args"
+        ]
+        parsed = parse_multiple_tags(response, kernel_tags)
+
+        # 检查是否成功解析
+        if parsed["init_params"] and parsed["init_body"]:
+            self.run_state_dict.kernel_src = self.config.interface.assemble_kernel_impl(
+                op_name,
+                init_params=parsed["init_params"],
+                init_body=parsed["init_body"],
+                process_body=parsed["process_body"],
+                copyin_body=parsed["copyin_body"],
+                compute_body=parsed["compute_body"],
+                copyout_body=parsed["copyout_body"],
+                member_vars=parsed["member_vars"],
+                global_func_params=parsed["global_func_params"],
+                init_call_args=parsed["init_call_args"],
+            )
+        else:
+            # 回退：尝试解析代码块
+            self._verbose("[Joint] Warning: Failed to parse kernel tags, falling back to code block")
+            self.run_state_dict.kernel_src = parse_code(response)
